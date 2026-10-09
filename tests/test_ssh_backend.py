@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 import asyncio
@@ -177,8 +178,8 @@ async def test_dial_route_pin_uses_empty_trusted_set(monkeypatch):
 
 async def test_dial_route_without_pin_defers_known_hosts(monkeypatch):
     seen = await _capture_dial_route(monkeypatch, host_key_sha256=None)
-    # No pin and no explicit known_hosts -> asyncssh default (None).
-    assert seen["known_hosts"] is None
+    # AsyncSSH uses () for defaults; None disables host-key verification.
+    assert seen["known_hosts"] == ()
 
 
 async def test_dial_route_explicit_known_hosts_wins(monkeypatch):

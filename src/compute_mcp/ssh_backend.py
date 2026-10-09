@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """AsyncSSH backend: container SSH connections, exec, PTY sessions and SFTP.
@@ -229,7 +230,7 @@ async def dial_route(
     else:
         # No explicit source and no pin: fall back to asyncssh's default
         # (~/.ssh/known_hosts); the client hook then validates against it.
-        selected_known_hosts = None
+        selected_known_hosts = ()
 
     try:
         return await asyncssh.connect(

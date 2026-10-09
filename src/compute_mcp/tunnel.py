@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Route-first SSH tunneling for the gateway.
@@ -364,7 +365,7 @@ async def _dial_hop(
     # When a pin is set, pass an empty trusted-key set so asyncssh still drives
     # the client hook (which validates the pin) instead of silently disabling
     # validation.  Without a pin, defer to asyncssh's ~/.ssh/known_hosts.
-    known_hosts = _empty_known_hosts if pin else None
+    known_hosts = _empty_known_hosts if pin else ()
     client_factory = lambda: InteractiveSSHClient(  # noqa: E731
         pin, prompter, accept_any=False
     )
