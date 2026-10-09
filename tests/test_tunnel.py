@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 import asyncio
@@ -217,14 +218,10 @@ async def test_proxy_jump_and_dynamic_endpoint_in_route(monkeypatch):
     final_conn = _SessionConn(("127.0.0.1", 22))
 
     async def fake_dial_route(**kwargs):
-        # The first (jump) hop has tunnel=None; the final hop is dialled by
-        # asyncssh directly in _dial_hop, so only the jump hits dial_route.
-        dialed.append((kwargs["name"], kwargs["port"]))
-        return jump_conn
-
-    async def fake_asyncssh_connect(host, **kwargs):
-        dialed.append((host, kwargs.get("port")))
-        assert kwargs.get("tunnel") is jump_conn
+        dialed.append((kwargs["host"], kwargs["port"]))
+        if kwargs["tunnel"] is None:
+            return jump_conn
+        assert kwargs["tunnel"] is jump_conn
         return final_conn
 
     async def fake_probe(host, port, timeout=8.0):
@@ -232,7 +229,6 @@ async def test_proxy_jump_and_dynamic_endpoint_in_route(monkeypatch):
 
     monkeypatch.setattr("compute_mcp.tunnel._resolve_route", fake_resolve)
     monkeypatch.setattr("compute_mcp.tunnel.dial_route", fake_dial_route)
-    monkeypatch.setattr("compute_mcp.tunnel.asyncssh.connect", fake_asyncssh_connect)
     monkeypatch.setattr("compute_mcp.tunnel.probe", fake_probe)
 
     tunnel = await mgr.connect(target, transport=transport)
@@ -244,9 +240,8 @@ async def test_proxy_jump_and_dynamic_endpoint_in_route(monkeypatch):
         assert final_conn.forwarded == [
             ("127.0.0.1", tunnel.local_port, "cn123", 2345)
         ]
-        # The jump hop is dialled through dial_route, and the final route hop
-        # through asyncssh with tunnel=jump_conn.
-        assert dialed[0] == ("rosi5-alias", 2200)
+        # Both hops share the route dialer; the second uses the first's tunnel.
+        assert dialed[0] == ("127.0.0.1", 2200)
         assert dialed[1] == ("127.0.0.1", 22)
     finally:
         await tunnel.stop()

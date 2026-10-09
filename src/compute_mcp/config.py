@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Trusted gateway configuration loading and validation.
@@ -618,6 +619,8 @@ class TargetConfig:
     # to ``ubuntu`` at dial time, matching ``COMPUTEMCP_SSH_USER``.
     container_user: str | None = None
     client_key: str | None = None
+    client_public_key: str | None = None
+    agent_path: str | None = None
     known_hosts: str | None = None
     host_key_sha256: str | None = None
     # Optional SHA256 pin for the LOGIN/ROUTE host key, distinct from
@@ -690,6 +693,10 @@ class TargetConfig:
     bundle: BundleConfig | None = None
 
     def __post_init__(self) -> None:
+        for name in ("client_public_key", "agent_path"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ConfigError(f"target {self.name!r} {name} must be a non-empty string")
         if self.provision_command and self.transport.kind != "tunnel":
             raise ConfigError(
                 f"target {self.name!r} provision_command requires tunnel transport"
@@ -720,12 +727,9 @@ class TargetConfig:
                         f"target {self.name!r} bundle needs 'deploy-dir' or a "
                         "container 'storage-root' to derive it from"
                     )
-            if not self.client_key:
-                # The gateway derives the container's authorized key from
-                # client_key; without it the container would accept no key and
-                # the failure would only surface after provisioning starts.
+            if not (self.client_key or self.client_public_key):
                 raise ConfigError(
-                    f"target {self.name!r} bundle requires 'client_key'"
+                    f"target {self.name!r} bundle requires 'client_key' or 'client_public_key'"
                 )
         if self.connect_command_mode not in ("on_failure", "always"):
             raise ConfigError(
@@ -943,6 +947,8 @@ def _load_target(name: str, value: dict, ssh: SSHConfig) -> TargetConfig:
         transport=transport,
         container_user=value.get("container_user"),
         client_key=value.get("client_key"),
+        client_public_key=value.get("client_public_key"),
+        agent_path=value.get("agent_path"),
         known_hosts=value.get("known_hosts"),
         host_key_sha256=value.get("host_key_sha256"),
         route_host_key_sha256=value.get("route_host_key_sha256"),

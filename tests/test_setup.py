@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Tests for the interactive setup wizard.
@@ -116,6 +117,24 @@ def _full_target():
         sbatch_account="proj",
         srun_cpu_bind="none",
     )
+
+
+def test_wizard_agent_only_bundle_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr("compute_mcp.setup.probe_ssh_alias", lambda alias: None)
+    public = str(tmp_path / "container.pub")
+    answers = collect_target(_wizard([
+        "login", "tunnel", "login", "tester", "-", public, "",
+        "", "n", "n",  # fingerprint, interactive auth, auto-connect
+        "y", "docker", str(tmp_path / "storage"), "ubuntu:24.04", "",
+        "y", "", "n",  # provision, environment, Slurm
+    ]), set())
+    assert answers.client_key == ""
+    config, _ = _write_and_load(tmp_path, answers)
+    target = config.targets["login"]
+    assert target.agent_path == "SSH_AUTH_SOCK"
+    assert target.client_public_key == public
+    assert target.client_key is None
+    assert target.bundle is not None
 
 
 def test_render_config_loads(tmp_path):

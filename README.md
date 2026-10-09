@@ -159,8 +159,9 @@ Create a dedicated gateway-to-container key (never the user's normal key):
 ssh-keygen -t ed25519 -f ~/.ssh/computemcp_container -C computeMCP-gateway
 ```
 
-For a bundle target this key does the whole job: the gateway reads the `.pub`
-half (or `ssh-keygen -y`) from `client_key` and configures the container's
+For a bundle target this key does the whole job: the gateway reads
+`client_public_key`, or the `.pub` half (or `ssh-keygen -y`) from `client_key`,
+and configures the container's
 `authorized_keys` for you, including inside the Slurm job. For a hand-built
 container, install the `.pub` half into the container's `authorized_keys` of
 `container_user` (default `ubuntu`) yourself, e.g.
@@ -173,6 +174,78 @@ container, install the `.pub` half into the container's `authorized_keys` of
 > fine but every `exec`/session fails with
 > `SSH connection to target '<t>' failed: [Errno 2] No such file or directory`.
 > Set the real absolute path for `client_key`, `token_file`, etc.
+
+### Using an existing SSH agent
+
+The host-side gateway can authenticate using an existing SSH agent, including
+GCR, without reading a private-key file. Key loading and unlock prompts remain
+the agent's responsibility; the gateway does not start or forward the agent.
+No agent socket or private key is sent to the remote container or the AI-agent
+container.
+
+For a machine already running `gcr-ssh-agent.socket`, launch the gateway with
+the socket in **its own process environment**:
+
+```bash
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/gcr/ssh"
+ssh-add -l                         # check which identities are available
+computeMCP-gateway
+```
+
+Use the actual socket path if your installation differs. A gateway launched as
+a service does not necessarily inherit the terminal's environment: configure
+its `SSH_AUTH_SOCK`, or use explicit socket paths below. Load/unlock the required
+identities with your normal agent tooling; the gateway reports missing sockets
+or unavailable matching identities rather than managing them.
+
+**Route and ProxyJump hops** use each alias's own SSH configuration:
+
+```sshconfig
+Host cluster-login
+    HostName login.example.org
+    User researcher
+    IdentityAgent SSH_AUTH_SOCK
+    IdentityFile ~/.ssh/cluster-login.pub
+    IdentitiesOnly yes
+```
+
+An absolute `IdentityAgent` socket path or `$ENVIRONMENT_VARIABLE` also works;
+`IdentityAgent none` disables agent use for that hop. With `IdentitiesOnly yes`,
+only agent identities matching that hop's `IdentityFile` public keys are
+offered. Configure jump aliases independently. Keys are not pooled across hops,
+and the container's `client_key` is **not** a route-login fallback. Route host
+keys must be trusted through the alias's known-hosts files or a route pin;
+unpinned jump hosts are verified too.
+
+**Remote-container authentication** is configured separately in the target:
+
+```toml
+# Within [targets.<name>]; omit client_key for agent-only authentication.
+agent_path = "SSH_AUTH_SOCK"
+client_public_key = "/home/USER/.ssh/computemcp_container.pub"
+```
+
+Replace `USER` with your account. `client_public_key` selects the container's
+agent identity and supplies its `authorized_keys` entry during bundle
+provisioning; only this public half needs to be on disk. Prefer a dedicated
+container identity, even when the same agent holds your cluster-login keys.
+`agent_path` can instead be an absolute socket path or `"none"` to disable agent
+use. When omitted, the gateway uses `SSH_AUTH_SOCK`. Without a public selector,
+available agent identities may be tried; bundle provisioning still requires
+either `client_public_key` or `client_key`.
+
+In tunnel setup (`--bootstrap` or `--add-target`), enter `-` at **Private key
+path** to select agent authentication, then supply the public-key path and
+socket. Direct targets accept the same TOML fields. Private-file authentication
+remains supported. If a route previously relied on the container's `client_key`
+fallback, add that key as an `IdentityFile` to its SSH alias instead. Each new
+SSH connection discovers the agent's current identities; changing an agent
+does not disconnect existing sessions.
+
+Connection-refused, DNS and unreachable-network errors identify the target and
+ask you to check connectivity and the configured address/port. Authentication
+and host-key failures remain separate. This uses the actual connection attempt,
+not an extra probe; the gateway does not detect or manage VPNs.
 
 ## Create the remote development container
 
@@ -974,7 +1047,8 @@ Describes the container runtime for the provisioning bundle.
 
 Tells the gateway to deploy the shipped provisioning bundle over the route
 connection and run it from there. No hand-placed copy is needed, and the
-container's authorized public key is derived from `client_key`.
+container's authorized public key comes from `client_public_key` or is derived
+from `client_key`.
 
 The bundle is the generic container provisioner: it builds and starts the
 container on the login node and submits a Slurm allocation when the target has
@@ -1307,7 +1381,8 @@ The gateway exports the resolved allocation and container description as
   Apptainer renames the sandbox's existing account to it and points it at the
   matching home.
 - `COMPUTEMCP_SSH_PUBLIC_KEY`: emitted for a `[targets.X.bundle]` target. The
-  gateway derives it from `client_key` (the `.pub` half, or `ssh-keygen -y`),
+  gateway reads `client_public_key` or derives it from `client_key`
+  (the `.pub` half, or `ssh-keygen -y`),
   so no manual `authorized_keys` placement is needed. An explicit
   `provision_command` target does not get it.
 - `COMPUTEMCP_PROVISION_ENV`: emitted only for a target with a
@@ -1924,7 +1999,7 @@ always maps to a gateway-side dial failure below.
 | Target fails to connect: "no host-key verification" / `Host key is not trusted` | Missing pin or stale pin: the container was recreated (new sshd host keys), or `host_key_sha256` is still a placeholder | Read the new fingerprint from the container and set `host_key_sha256` (+ `host_key_algorithms`), then refresh |
 | Target fails to connect: `Host key is not trusted for host` | Route or container key pin mismatch after recreate, or the alias now reaches a different sshd | Same as above; verify with `ssh-keygen -lf` on the key the gateway dials |
 | Route connects, but the container never starts ("container not built") | Missing `[targets.X.bundle]` block (and no manual `provision_command`): the gateway connected the route but is not told to build the container | Add the `[targets.X.bundle]` block (with `container.storage-root` or `bundle.deploy-dir`), `reload`, then `target-connect <t>` |
-| Bundle target fails to deploy: `bundle requires 'client_key'` / `bundle needs 'deploy-dir' or a container 'storage-root'` | Bundle validation is strict: it needs `client_key` (source of the container's authorized key) and a specific deploy location | Set `client_key` and either `bundle.deploy-dir` or `container.storage-root`; the deploy location must be visible to login and compute nodes |
+| Bundle target fails to deploy: missing client key / missing deploy directory | Bundle validation needs `client_public_key` or `client_key` (source of the container's authorized key) and a specific deploy location | Set the public-key or private-key path and either `bundle.deploy-dir` or `container.storage-root`; the deploy location must be visible to login and compute nodes |
 | "Route works but nothing listens" (provisioned endpoint never answers) | Container is not running (a stopped Docker container keeps its files but no listener), or the published/fetched port no longer matches the state the helper recorded after a start | Check on the remote: `docker ps -a` / `apptainer instance list`. To bring the container back up automatically, set `connect_command` (see "Recovering a stopped container"; the bundle or a manual `ensure-container.sh` both work), or rerun `target-refresh <t>` after starting it by hand |
 | `multi-node not yet supported` | `--set nodes=N` with `N > 1`: the gateway computes the plan, but the shipped helper rejects multi-node today | Use `nodes = 1` until multi-node support lands (see "Requirements and validation") |
 | Handshake cannot reach the gateway (connection refused/timeout from inside a Terok task) | Terok Shield is default-deny: the task cannot open the gateway endpoint until the project allows it | Add `COMPUTEMCP_GATEWAY`'s host:port to the project's `project.toml` `shield.allow`/`override` and create a new task; see [Allow the gateway in the Terok Shield](#allow-the-gateway-in-the-terok-shield) |

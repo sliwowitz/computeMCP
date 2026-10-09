@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Unit tests for the ``ssh -G`` route resolver in ``compute_mcp.tunnel``.
@@ -14,7 +15,7 @@ import os
 
 import pytest
 
-from compute_mcp.config import SSHConfig, TargetConfig, TransportConfig
+from compute_mcp.config import SSHConfig
 from compute_mcp.tunnel import (
     TunnelError,
     _iter_hops,
@@ -240,19 +241,13 @@ def test_iter_hops_yields_jumps_first_then_route():
 # _route_client_keys filtering
 # ---------------------------------------------------------------------------
 
-def test_route_client_keys_skips_missing_and_keeps_target_key(tmp_path):
+def test_route_client_keys_keeps_hop_identities_separate(tmp_path):
     present_a = tmp_path / "id_a"
     present_a.write_text("key-a")
     present_b = tmp_path / "id_b"
     present_b.write_text("key-b")
     missing = tmp_path / "does-not-exist"
 
-    target = TargetConfig(
-        name="hal",
-        user="agent",
-        transport=TransportConfig(kind="tunnel", ssh_targets=("hal",)),
-        client_key=str(present_b),
-    )
     info = _route(
         "route",
         identityfiles=(str(present_a), str(missing)),
@@ -263,19 +258,13 @@ def test_route_client_keys_skips_missing_and_keeps_target_key(tmp_path):
             ),
         ),
     )
-    keys = _route_client_keys(target, info)
-    # Jump hops come first (dial order), missing inherited defaults skipped,
-    # duplicates removed, and the target.client_key already present is kept.
-    assert keys == [str(present_b), str(present_a)]
+    assert _route_client_keys(info) == [str(present_a)]
+    assert _route_client_keys(info["jumps"][0]) == [str(present_b)]
 
 
-def test_route_client_keys_keeps_missing_explicit_client_key(tmp_path):
+def test_route_client_keys_accepts_missing_private_half(tmp_path):
     missing_explicit = tmp_path / "explicit-missing"
-    target = TargetConfig(
-        name="hal",
-        user="agent",
-        transport=TransportConfig(kind="tunnel", ssh_targets=("hal",)),
-        client_key=str(missing_explicit),
-    )
-    keys = _route_client_keys(target, _route("hal"))
-    assert keys == [str(missing_explicit)]
+    public = missing_explicit.with_suffix(".pub")
+    public.write_text("public identity")
+    keys = _route_client_keys(_route("hal", identityfiles=(str(missing_explicit),)))
+    assert keys == [str(public)]

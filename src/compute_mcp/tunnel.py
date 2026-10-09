@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Route-first SSH tunneling for the gateway.
@@ -38,8 +39,6 @@ from . import bundle as bundle_module
 from .config import SSHConfig, TargetConfig, TransportConfig
 from .ssh_backend import (
     SSHError,
-    InteractiveSSHClient,
-    _empty_known_hosts,
     dial_route,
     make_factor_prompter,
 )
@@ -191,6 +190,10 @@ async def _resolve_route(
     identityfiles: list[str] = []
     proxyjump = ""
     proxycommand = ""
+    agent_path = None
+    identities_only = False
+    known_hosts = []
+    host_key_alias = ()
 
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -212,6 +215,16 @@ async def _resolve_route(
             proxyjump = value
         elif key == "proxycommand":
             proxycommand = value
+        elif key == "identityagent":
+            agent_path = _unquote(value)
+        elif key == "identitiesonly":
+            identities_only = value == "yes"
+        elif key in ("userknownhostsfile", "globalknownhostsfile"):
+            known_hosts.extend(
+                os.path.expanduser(path) for path in shlex.split(value) if path != "none"
+            )
+        elif key == "hostkeyalias":
+            host_key_alias = _unquote(value)
 
     if proxycommand:
         raise TunnelError(
@@ -241,6 +254,10 @@ async def _resolve_route(
         "port": port if port is not None else 22,
         "identityfiles": tuple(identityfiles),
         "jumps": tuple(jumps),
+        "agent_path": agent_path,
+        "identities_only": identities_only,
+        "known_hosts": tuple(known_hosts),
+        "host_key_alias": host_key_alias,
     }
 
 
@@ -283,22 +300,13 @@ async def _apply_configured_proxy_jump(
     return merged
 
 
-def _route_client_keys(target: TargetConfig, info: dict) -> list[str]:
-    """Build the route key list from resolved identities plus the config key.
-
-    Every hop's ``IdentityFile`` entries are collected (jump hosts first).  The
-    local ``ssh -G`` reports the OpenSSH default identity filenames whether or
-    not they exist; OpenSSH ignores missing ones, asyncssh raises on them.  Skip
-    non-existent inherited identities, but always keep an explicitly configured
-    ``client_key`` so a bad path fails loudly.
-    """
+def _route_client_keys(info: dict) -> list[str]:
+    """Select this hop's files; missing private halves may have public selectors."""
     keys: list[str] = []
-    for hop in _iter_hops(info):
-        for path in hop.get("identityfiles", ()):
-            if os.path.isfile(path) and path not in keys:
-                keys.append(path)
-    if target.client_key and target.client_key not in keys:
-        keys.append(target.client_key)
+    for path in info.get("identityfiles", ()):
+        selected = path if os.path.isfile(path) else path + ".pub"
+        if os.path.isfile(selected) and selected not in keys:
+            keys.append(selected)
     return keys
 
 
@@ -338,55 +346,31 @@ async def _dial_hop(
     # asyncssh's "unset" sentinel is (), not None: passing None crashes in
     # saslprep.  An empty user lets the SSH config alias / local account decide.
     username = info["user"] or fallback_user or ()
-    keys = list(client_keys) if client_keys else None
-    if tunnel is None:
-        # First hop: use the dedicated route primitive (pin + prompter aware).
-        return await dial_route(
-            name=name,
-            host=host,
-            port=port,
-            username=username,
-            client_keys=keys,
-            passphrase=passphrase,
-            prompter=prompter,
-            host_key_sha256=pin,
-            known_hosts=None,
-            host_key_algorithms=(),
-            host_key_check="on",
-            connect_timeout=ssh_timeout,
-            keepalive_interval=ssh.server_alive_interval,
-            keepalive_count_max=ssh.server_alive_count_max,
+    known_hosts = None
+    if not pin and info.get("known_hosts"):
+        # OpenSSH ignores absent default files (e.g. system known_hosts).
+        known_hosts = asyncssh.read_known_hosts(
+            [path for path in info["known_hosts"] if os.path.isfile(path)]
         )
-
-    # Subsequent hop: asyncssh forwards the TCP connection over ``tunnel``.
-    # ``dial_route`` does not expose asyncssh's ``tunnel=`` keyword, so mirror
-    # its client factory / host-key contract here (same pin, prompter, keys).
-    # When a pin is set, pass an empty trusted-key set so asyncssh still drives
-    # the client hook (which validates the pin) instead of silently disabling
-    # validation.  Without a pin, defer to asyncssh's ~/.ssh/known_hosts.
-    known_hosts = _empty_known_hosts if pin else None
-    client_factory = lambda: InteractiveSSHClient(  # noqa: E731
-        pin, prompter, accept_any=False
+    return await dial_route(
+        name=name,
+        host=host,
+        port=port,
+        username=username,
+        client_keys=client_keys,
+        agent_path=info.get("agent_path"),
+        identities_only=info.get("identities_only", False),
+        passphrase=passphrase,
+        prompter=prompter,
+        host_key_sha256=pin,
+        known_hosts=known_hosts,
+        host_key_alias=info.get("host_key_alias", ()),
+        host_key_algorithms=(),
+        tunnel=tunnel,
+        connect_timeout=ssh_timeout,
+        keepalive_interval=ssh.server_alive_interval,
+        keepalive_count_max=ssh.server_alive_count_max,
     )
-    try:
-        return await asyncssh.connect(
-            host,
-            port=port,
-            username=username,
-            client_keys=keys,
-            passphrase=passphrase,
-            known_hosts=known_hosts,
-            client_factory=client_factory,
-            server_host_key_algs=(),
-            tunnel=tunnel,
-            connect_timeout=ssh_timeout,
-            keepalive_interval=ssh.server_alive_interval,
-            keepalive_count_max=ssh.server_alive_count_max,
-        )
-    except (asyncssh.Error, OSError) as exc:
-        raise SSHError(
-            f"SSH route connection to {name!r} failed: {exc}"
-        ) from exc
 
 
 def _probe_once(host: str, port: int) -> bool:
@@ -501,7 +485,6 @@ class TunnelManager:
                 route, route_info, proxy_jump, self.ssh
             )
 
-        client_keys = _route_client_keys(target, route_info)
         pin = target.route_host_key_sha256 or None
 
         opened: list[asyncssh.SSHClientConnection] = []
@@ -512,7 +495,7 @@ class TunnelManager:
                 tunnel_conn = await _dial_hop(
                     hop,
                     tunnel=conn,
-                    client_keys=client_keys,
+                    client_keys=_route_client_keys(hop),
                     prompter=None,
                     pin=pin if is_final else None,
                     ssh=self.ssh,
@@ -562,7 +545,9 @@ class TunnelManager:
         if transport.kind == "direct":
             if not await probe(transport.remote_host, transport.remote_port):
                 raise TunnelError(
-                    f"direct endpoint {transport.remote_host}:{transport.remote_port} unreachable"
+                    f"Cannot reach target {target.name!r} at "
+                    f"{transport.remote_host}:{transport.remote_port}. "
+                    "Check network connectivity and the configured address/port, then retry."
                 )
             return RouteTunnel(
                 target=target, route=None, local_port=transport.remote_port
@@ -575,7 +560,6 @@ class TunnelManager:
                 route, route_info, proxy_jump, self.ssh
             )
 
-        client_keys = _route_client_keys(target, route_info)
         prompter = make_factor_prompter(factor) if factor is not None else None
         pin = target.route_host_key_sha256 or None
 
@@ -587,7 +571,7 @@ class TunnelManager:
                 tunnel_conn = await _dial_hop(
                     hop,
                     tunnel=conn,
-                    client_keys=client_keys,
+                    client_keys=_route_client_keys(hop),
                     prompter=prompter,
                     pin=pin if is_final else None,
                     ssh=self.ssh,
