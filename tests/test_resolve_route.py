@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Unit tests for the ``ssh -G`` route resolver in ``compute_mcp.tunnel``.
@@ -17,6 +18,7 @@ import pytest
 from compute_mcp.config import SSHConfig, TargetConfig, TransportConfig
 from compute_mcp.tunnel import (
     TunnelError,
+    _dial_hop,
     _iter_hops,
     _resolve_route,
     _route_client_keys,
@@ -279,3 +281,38 @@ def test_route_client_keys_keeps_missing_explicit_client_key(tmp_path):
     )
     keys = _route_client_keys(target, _route("hal"))
     assert keys == [str(missing_explicit)]
+
+
+@pytest.mark.parametrize("agent_path", [None, "SSH_AUTH_SOCK"])
+def test_per_hop_public_identities_require_opt_in(tmp_path, agent_path):
+    jump = tmp_path / "jump"
+    jump.write_text("jump key")
+    route = tmp_path / "route"
+    public = tmp_path / "route.pub"
+    public.write_text("route public key")
+    fallback = str(tmp_path / "container")
+    target = TargetConfig(
+        name="test", user="tester", client_key=fallback, agent_path=agent_path,
+        transport=TransportConfig(kind="tunnel", ssh_targets=("route",)),
+    )
+    info = _route(
+        "route", identityfiles=(str(route),),
+        jumps=(_route("jump", identityfiles=(str(jump),)),),
+    )
+    expected = [str(public)] if agent_path else [str(jump), fallback]
+    assert _route_client_keys(target, info) == expected
+
+
+@pytest.mark.parametrize("agent_path", [None, "SSH_AUTH_SOCK"])
+@pytest.mark.parametrize("override", [None, "none"])
+async def test_route_agent_settings_require_opt_in(monkeypatch, agent_path, override):
+    async def capture(**kwargs):
+        return kwargs
+
+    monkeypatch.setattr("compute_mcp.tunnel.dial_route", capture)
+    result = await _dial_hop(
+        _route("route", agent_path=override, identities_only=True),
+        tunnel=None, client_keys=[], prompter=None, pin=None, ssh=SSHConfig(),
+        name="test", fallback_user="tester", agent_path=agent_path,
+    )
+    assert result["agent_path"] == ((override or agent_path) if agent_path else None)

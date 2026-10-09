@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Deploy versioned helper bundles to a login node over the route connection.
@@ -149,11 +150,18 @@ def resolve_deploy_dir(target: TargetConfig) -> str:
 def public_key_for(target: TargetConfig) -> str | None:
     """Derive the container's authorized public key from the target key.
 
-    Prefers ``<client_key>.pub`` and falls back to ``ssh-keygen -y -f``.  The
+    Uses ``client_public_key`` when set; otherwise prefers ``<client_key>.pub``
+    and falls back to ``ssh-keygen -y -f``.  The
     result is the public half only; the private key never leaves the gateway
     host.  Returns ``None`` when there is no client key to derive from.
     """
-    key_path = target.client_key
+    if target.client_public_key:
+        try:
+            key = asyncssh.read_public_key(os.path.expanduser(target.client_public_key))
+        except (OSError, asyncssh.KeyImportError) as exc:
+            raise BundleError(f"target {target.name!r}: cannot read public key: {exc}") from exc
+        return key.export_public_key().decode().strip()
+    key_path = os.path.expanduser(target.client_key) if target.client_key else None
     if not key_path:
         return None
     pub_path = key_path + ".pub"

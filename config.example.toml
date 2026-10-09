@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 # computeMCP gateway configuration.
@@ -127,6 +128,10 @@ host_key_algorithms = ["ssh-ed25519"]
 # if set, but it does NOT verify the server's identity.
 host_key_check = "on"
 client_key = "/home/USER/.ssh/computemcp_container"
+# Optional agent mode: omit client_key above for public-only authentication.
+# Without agent_path, existing authentication and key fallback are unchanged.
+# agent_path = "SSH_AUTH_SOCK"  # or a socket path; route IdentityAgent overrides
+# client_public_key = "/home/USER/.ssh/computemcp_container.pub"
 # "shared" (default) multiplexes all exec/sessions over one SSH connection.
 # "dedicated" opens a fresh connection per exec/session, bypassing the remote
 # sshd's per-connection MaxSessions limit (commonly 10) at the cost of more
@@ -261,7 +266,7 @@ client_key = "/home/USER/.ssh/computemcp_container"
 # With a [targets.X.bundle] block the gateway deploys the bundle itself.  It
 # opens the route connection, uploads the four helper files into deploy-dir over
 # SFTP only when the remote content marker differs, derives the container's
-# authorized public key from client_key, and runs the deployed helper.  The
+# authorized public key from client_public_key or client_key, and runs the helper. The
 # copy is versioned: after a gateway upgrade the changed bundle is re-deployed
 # on the next connect.  The deploy directory must be on storage visible to the
 # login AND compute nodes (the batch step runs the container script there), so
@@ -483,7 +488,7 @@ client_key = "/home/USER/.ssh/computemcp_container"
 # The blocks below are commented-out but valid TOML once the leading `# ` is
 # removed.  They are the same keys the loader validates; no key here is
 # invented.  Replace X with a real target name, set the string values, then
-# delete the blocks you do not need.  `bundle` needs `client_key` (on the
+# delete the blocks you do not need. `bundle` needs `client_public_key` or `client_key` (on the
 # target) and, unless `deploy-dir` is set, a `container.storage-root` to
 # derive the deployment directory from.  `node`/`allocation`/`slurm` are all
 # optional; without them a target is a plain container host.
@@ -524,4 +529,3 @@ client_key = "/home/USER/.ssh/computemcp_container"
 # nodes = "nodes"
 # gpus-per-node = "gres"
 # cpus-per-node = "cpus-per-task"
-

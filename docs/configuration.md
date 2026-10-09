@@ -233,7 +233,9 @@ infrastructure detail, not an operator hint.
 |---|---|---|---|---|---|
 | `user` | optional | string | *Route* login account used for the gateway → route hop. Empty (or absent) defers the user to the SSH alias or local account. Must be a string. | e.g. `"alice"`, `""` | not set → loader falls back to `""` |
 | `container_user` | optional (conditionally mandatory — see note) | string | Container login account (see note above). Required to be valid and non-root when set; `root` is rejected. | e.g. `"ubuntu"`, `"test"` | not set → resolves to `$COMPUTEMCP_SSH_USER` else `"ubuntu"` |
-| `client_key` | optional (conditionally mandatory when `[bundle]` is present) | string | Path (local, to the gateway host) of the private key the tunnel uses to dial the container. A bundle derives the container's public authorized key from it, so a bundle without `client_key` is a load error. | e.g. `"~/.ssh/computemcp_ed25519"` | not set |
+| `client_key` | optional | string | Container private-key path on the gateway. A bundle requires this or `client_public_key`. | e.g. `"~/.ssh/computemcp_ed25519"` | not set |
+| `client_public_key` | optional | string | Public-key path selecting the container agent identity and supplying bundle `authorized_keys`. | e.g. `"~/.ssh/computemcp_ed25519.pub"` | not set |
+| `agent_path` | optional | string | Opt into agent authentication; route `IdentityAgent` overrides this socket. | `"SSH_AUTH_SOCK"`, socket path, or `"none"` | not set → legacy authentication |
 | `known_hosts` | optional | string | Path to a known-hosts file. Used when `host_key_sha256` is not set and `host_key_check = "on"`. | e.g. `"~/.ssh/computemcp_known_hosts"` | not set |
 | `host_key_sha256` | optional (conditionally mandatory when `host_key_check = "on"` and `known_hosts` is unset) | string | Exact SHA-256 host key fingerprint pinning the **container** host. Must start with `SHA256:` and be at least 12 characters long. | e.g. `"SHA256:aaa…"` (real fingerprint) | not set |
 | `route_host_key_sha256` | optional | string | Exact SHA-256 fingerprint pinning the **route/login** host, checked before any container dial. Same shape constraint as `host_key_sha256`. | e.g. `"SHA256:bbb…"` | not set |
@@ -278,6 +280,33 @@ Transport validation (`__post_init__`):
 The `--transport` CLI flag of `computeMCP-gateway` forces the kind for **all**
 targets after load. When forcing `tunnel` into a target that has no
 `ssh_targets`, the target name becomes the single route entry.
+
+### SSH-agent authentication (opt-in)
+
+Omitting `agent_path` preserves existing authentication and key fallback behavior.
+To opt in with an already-running GCR agent:
+
+```bash
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/gcr/ssh"
+ssh-add -l
+computeMCP-gateway
+```
+
+Add these fields to the target (replace `USER`; omit `client_key` for agent-only use):
+
+```toml
+agent_path = "SSH_AUTH_SOCK"  # or an absolute socket path
+client_public_key = "/home/USER/.ssh/computemcp_container.pub"
+```
+
+The public key selects the container identity and supplies bundle `authorized_keys`.
+In agent mode, each route hop uses its own `IdentityFile` and `IdentitiesOnly`;
+its `IdentityAgent` overrides the target socket. `"none"` disables agent use.
+The gateway never forwards the agent in this mode. Services need the socket
+in their own environment or an explicit path.
+
+In setup, enter `-` at **Private key path**, then supply the public key and socket.
+Connection errors prompt a generic connectivity check; no VPN management is added.
 
 ## 9. `[targets.<name>.node]`
 
@@ -456,7 +485,7 @@ alone (no node/allocation/slurm) still makes `_env_configured` true so the
 Names the helper bundle the gateway deploys to provision the container.
 Requires `transport = "tunnel"` (also `provision-env`). A bundle without
 `deploy-dir` and without `container.storage-root` is a load error; a bundle
-without `client_key` is a load error.
+without `client_key` or `client_public_key` is a load error.
 
 | Keyword | Required / optional | Type | Description | Allowed values / example | Default |
 |---|---|---|---|---|---|
@@ -466,7 +495,7 @@ without `client_key` is a load error.
 | `provision-env` | optional (requires `transport = "tunnel"`) | array of strings | Shell lines executed on the remote **before** the container runtime is used. Non-empty; no NUL or carriage return. | e.g. `["export CUDA_HOME=/usr/local/cuda-12.4"]` | `()` (no hooks) |
 
 Unknown keys under `[targets.<name>.bundle]` are a load error. When the bundle
-is present, `COMPUTEMCP_SSH_PUBLIC_KEY` (derived from `client_key`) and
+is present, `COMPUTEMCP_SSH_PUBLIC_KEY` (from `client_public_key` or `client_key`) and
 `COMPUTEMCP_PROVISION_ENV` (joined `provision-env` lines) are entered into the
 provisioner contract; see [Gateway to provisioner contract](#18-gateway-to-provisioner-contract).
 
@@ -655,7 +684,7 @@ The contract, with the condition under which each variable is emitted:
 | `COMPUTEMCP_SANDBOX` | `"true"` iff a container exists and `sandbox` is true; else `"false"`. |
 | `COMPUTEMCP_BUILD_LOCATION` | `container.build_location` (normalised: `login`/`compute`), or `"login"`. |
 | `COMPUTEMCP_SSH_USER` | `container_login_user(target)` — the resolved container dial account. Emitted **only** when a container or bundle block is present. |
-| `COMPUTEMCP_SSH_PUBLIC_KEY` | Public key derived from `client_key`. Emitted **only** when a bundle block is present **and** the derived public key is non-empty. |
+| `COMPUTEMCP_SSH_PUBLIC_KEY` | Public key from `client_public_key` or derived from `client_key`. Emitted **only** when a bundle block is present **and** the public key is non-empty. |
 | `COMPUTEMCP_PROVISION_ENV` | `bundle.provision_env` lines joined by newline. Emitted **only** when a bundle block is present. An empty tuple yields `""`. |
 
 Out of the gateway → provisioner contract (managed by the bundle, not the

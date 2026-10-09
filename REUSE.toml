@@ -14,3 +14,9 @@ path = ["docs/operations.md"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = ["René Widera", "2026 Jiri Vyskocil"]
 SPDX-License-Identifier = "ISC"
+
+[[annotations]]
+path = ["README.md", "docs/configuration.md", "docs/provisioning.md", "docs/troubleshooting.md"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["René Widera", "2026 Jiri Vyskocil"]
+SPDX-License-Identifier = "ISC"

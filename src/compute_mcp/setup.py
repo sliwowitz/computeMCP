@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Interactive setup wizard for the computeMCP gateway.
@@ -62,6 +63,8 @@ class TargetAnswers:
     direct_port: int = 2222
     user: str = ""
     client_key: str = ""
+    client_public_key: str = ""
+    agent_path: str | None = None
     host_key_sha256: str | None = None
     host_key_check: str = "on"
     host_key_algorithms: tuple[str, ...] = ()
@@ -355,6 +358,10 @@ def render_target_block(answers: TargetAnswers) -> str:
         lines.append(f"user = {_toml_str(answers.user)}")
     if answers.client_key:
         lines.append(f"client_key = {_toml_str(answers.client_key)}")
+    if answers.client_public_key:
+        lines.append(f"client_public_key = {_toml_str(answers.client_public_key)}")
+    if answers.agent_path:
+        lines.append(f"agent_path = {_toml_str(answers.agent_path)}")
     if answers.host_key_sha256:
         lines.append(f"host_key_sha256 = {_toml_str(answers.host_key_sha256)}")
     if answers.host_key_check != "on":
@@ -740,9 +747,21 @@ def collect_target(wizard: Wizard, existing: set[str]) -> TargetAnswers:
         default_key = str(Path.home() / ".ssh" / "computemcp_container")
         answers.client_key = wizard.ask(
             "Private key path",
-            description="dedicated gateway key; never your personal key",
+            description="dedicated container key, or - to use an SSH agent",
             default=default_key,
         )
+        if answers.client_key == "-":
+            answers.client_key = ""
+            answers.client_public_key = wizard.ask(
+                "Container public key path",
+                description="public key selecting the agent identity; required for bundle provisioning",
+                required=False,
+            )
+            answers.agent_path = wizard.ask(
+                "SSH agent socket",
+                description="default socket; route aliases may override IdentityAgent",
+                default="SSH_AUTH_SOCK",
+            )
     else:
         host = wizard.ask("Remote host", description="IP or hostname")
         port = wizard.ask_int(
@@ -859,14 +878,14 @@ def collect_target(wizard: Wizard, existing: set[str]) -> TargetAnswers:
                 v for v in answers.container_gpus if v in GPU_VENDORS
             )
 
-    # A bundle needs tunnel transport and a client key (validated by the
+    # A bundle needs tunnel transport and a public identity (validated by the
     # loader); only offer it where it can actually work.  The shipped bundle is
     # the generic container provisioner, not Slurm-specific, so the provisioning
     # question is independent of the scheduler question below.
     if (
         answers.container_runtime
         and answers.transport == "tunnel"
-        and answers.client_key
+        and (answers.client_key or answers.client_public_key)
     ):
         if wizard.confirm(
             "Should the gateway build and start this container?",

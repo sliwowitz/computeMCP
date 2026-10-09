@@ -52,6 +52,8 @@ ssh-keygen -t ed25519 -f ~/.ssh/computemcp_container -C computeMCP-gateway
 The key is the gateway's identity for the container. Do not reuse your personal
 key.
 
+An existing SSH agent is an [opt-in alternative](docs/configuration.md#ssh-agent-authentication-opt-in).
+
 ### 2. Gateway host - configure (bootstrap)
 
 ```bash
