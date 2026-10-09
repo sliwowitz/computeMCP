@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """In-process asyncssh integration tests for the route-first tunnel.
@@ -493,7 +494,6 @@ async def test_proxyjump_nonfinal_hop_dialed_without_route_pin(
 ):
     """The jump hop gets no route pin; the final route hop does."""
     dialed = []
-    final_calls = []
 
     async def fake_resolve(alias, ssh, _seen=None):
         if alias == "route":
@@ -525,10 +525,7 @@ async def test_proxyjump_nonfinal_hop_dialed_without_route_pin(
 
     async def fake_dial_route(**kwargs):
         dialed.append(kwargs.get("host_key_sha256"))
-        return _FakeRouteConn()
-
-    async def fake_connect(host, **kwargs):
-        final_calls.append(kwargs)
+        assert (kwargs["tunnel"] is None) == (len(dialed) == 1)
         return _FakeRouteConn()
 
     async def fake_probe(host, port, timeout=8.0):
@@ -536,7 +533,6 @@ async def test_proxyjump_nonfinal_hop_dialed_without_route_pin(
 
     monkeypatch.setattr("compute_mcp.tunnel._resolve_route", fake_resolve)
     monkeypatch.setattr("compute_mcp.tunnel.dial_route", fake_dial_route)
-    monkeypatch.setattr("compute_mcp.tunnel.asyncssh.connect", fake_connect)
     monkeypatch.setattr("compute_mcp.tunnel.probe", fake_probe)
 
     pin = "SHA256:abcdefghijklmnopqrstuvwxyz0123456789"
@@ -554,13 +550,7 @@ async def test_proxyjump_nonfinal_hop_dialed_without_route_pin(
         mgr.open_for_route(target, "route", local_port), CONNECT_TIMEOUT
     )
     try:
-        # The non-final (jump) hop through dial_route must have no pin.
-        assert dialed == [None]
-        # The final hop goes through asyncssh.connect with a pin-bearing client.
-        assert len(final_calls) == 1
-        client_factory = final_calls[0]["client_factory"]
-        client = client_factory()
-        assert client._pin is not None
+        assert dialed == [None, pin]
     finally:
         await tunnel.stop()
         mgr.release(tunnel)

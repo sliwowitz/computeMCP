@@ -87,7 +87,7 @@ When the gateway deploys and runs `computemcp-provision.sh`:
    gateway bundle hash when `auto-deploy = true` (the default), so a gateway
    upgrade re-builds only when needed.
 2. **Install the container SSH key**. For a bundle target the gateway
-   derives it from `client_key` (the `.pub` half, or `ssh-keygen -y` if
+   reads `client_public_key` or derives it from `client_key` (the `.pub` half, or `ssh-keygen -y` if
    only the private half is present). The private key stays on the gateway
    host; only the public half travels.
 3. **Submit a single-node Slurm allocation** when
@@ -205,9 +205,8 @@ The route connection (gateway → login node) authenticates with the gateway
 user's SSH key, which the alias in `~/.ssh/config` names. That is separate
 from the key the **container** sshd accepts:
 
-- **Bundle target.** `client_key` gives the gateway the private key for the
-  container account, and the gateway runs `ssh-keygen -y` on it (or reads the
-  `.pub` half if present) to derive the **public** key. The bundle receives
+- **Bundle target.** The gateway reads `client_public_key`, or derives the
+  **public** key from `client_key` (`.pub` half or `ssh-keygen -y`). The bundle receives
   it as `COMPUTEMCP_SSH_PUBLIC_KEY` and the helper installs it into the
   container's `authorized_keys`. Manual placement is **not** needed.
 - **Manual target.** The public key must go into the `container_user`
@@ -387,7 +386,7 @@ array.
 | Variable | Value |
 | --- | --- |
 | `COMPUTEMCP_SSH_USER` | The account the container sshd must allow (see [section 2.3](#23-route-user-vs-in-container-container_user)). Emitted whenever a `[container]` or `[bundle]` block exists. |
-| `COMPUTEMCP_SSH_PUBLIC_KEY` | The public key derived from `client_key`. Emitted only for a `[bundle]` target with a derivable key. Manual targets do not get it. |
+| `COMPUTEMCP_SSH_PUBLIC_KEY` | Public key from `client_public_key` or derived from `client_key`. Emitted only for a `[bundle]` target with a public key. Manual targets do not get it. |
 | `COMPUTEMCP_PROVISION_ENV` | `provision-env` lines joined with a single newline. Empty tuple → empty string (helper no-ops). |
 
 ### 3.5 `sbatch` / `srun` stage separation in practice

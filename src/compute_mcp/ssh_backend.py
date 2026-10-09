@@ -16,14 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
 import re
+import socket
 from dataclasses import dataclass, field
 from typing import Awaitable, Protocol
 
 import asyncssh
 
 from .config import TargetConfig, container_login_user
+from .ssh_auth import AgentError, authentication_keys
 
 log = logging.getLogger("compute_mcp.ssh")
 
@@ -54,6 +57,62 @@ def _channel_open_message(prefix: str, exc: BaseException) -> str:
         "connect_mode='dedicated' or retrying: "
         f"{exc}"
     )
+
+
+async def connect_ssh(
+    host: str,
+    *,
+    port: int,
+    name: str,
+    client_keys: list[str] | tuple[str, ...] | None = None,
+    agent_path: str | None = None,
+    identities_only: bool = False,
+    passphrase: str | None = None,
+    interactive: bool = False,
+    connect_timeout: float = 10.0,
+    **kwargs,
+) -> asyncssh.SSHClientConnection:
+    """Authenticate through local identities and report network failures distinctly."""
+    try:
+        async with authentication_keys(
+            client_keys or (),
+            agent_path=agent_path,
+            identities_only=identities_only,
+            passphrase=passphrase,
+            timeout=connect_timeout,
+            interactive=interactive,
+        ) as keys:
+            return await asyncssh.connect(
+                host,
+                port=port,
+                client_keys=keys,
+                passphrase=passphrase,
+                connect_timeout=connect_timeout,
+                **({"agent_path": None, "agent_forwarding": False} if agent_path is not None else {}),
+                **kwargs,
+            )
+    except AgentError as exc:
+        raise SSHError(str(exc)) from exc
+    except (OSError, asyncssh.ChannelOpenError) as exc:
+        network_failure = isinstance(exc, OSError) and (
+            isinstance(exc, socket.gaierror)
+            or exc.errno in {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH}
+        )
+        jump_failure = (
+            isinstance(exc, asyncssh.ChannelOpenError)
+            and exc.code == asyncssh.OPEN_CONNECT_FAILED
+        )
+        if network_failure or jump_failure:
+            raise SSHError(
+                f"Cannot reach target {name!r} at {host}:{port}: {exc}. "
+                "Check network connectivity and the configured address/port, then retry."
+            ) from exc
+        if isinstance(exc, TimeoutError):
+            raise SSHError(
+                f"SSH connection to target {name!r} at {host}:{port} timed out. "
+                "Check network connectivity and SSH authentication, then retry."
+            ) from exc
+        raise
 
 
 @dataclass
@@ -200,6 +259,9 @@ async def dial_route(
     connect_timeout: float = 10.0,
     keepalive_interval: int = 30,
     keepalive_count_max: int = 3,
+    agent_path: str | None = None,
+    identities_only: bool = False,
+    tunnel: asyncssh.SSHClientConnection | None = None,
 ) -> asyncssh.SSHClientConnection:
     """Dial the gateway -> login/route host (the hop before the container).
 
@@ -233,18 +295,23 @@ async def dial_route(
         selected_known_hosts = ()
 
     try:
-        return await asyncssh.connect(
+        return await connect_ssh(
             host,
+            name=name,
             port=port,
             username=username,
-            client_keys=list(client_keys) if client_keys else None,
+            client_keys=client_keys,
+            agent_path=agent_path,
+            identities_only=identities_only,
             passphrase=passphrase,
+            interactive=prompter is not None,
             known_hosts=selected_known_hosts,
             client_factory=client_factory,
             server_host_key_algs=host_key_algorithms or (),
             connect_timeout=connect_timeout,
             keepalive_interval=keepalive_interval,
             keepalive_count_max=keepalive_count_max,
+            tunnel=tunnel,
         )
     except (asyncssh.Error, OSError) as exc:
         if prompter is not None or passphrase is not None:
@@ -426,15 +493,21 @@ class SSHBackend:
             pin, active_prompter, accept_any=accept_any
         )
 
-        client_keys = [target.client_key] if target.client_key else None
+        client_keys = [target.client_key] if target.client_key else []
+        if target.client_public_key:
+            client_keys.append(target.client_public_key)
         server_host_key_algs = target.host_key_algorithms or ()
         try:
-            return await asyncssh.connect(
+            return await connect_ssh(
                 host,
+                name=target.name,
                 port=port,
                 username=username,
                 client_keys=client_keys,
+                agent_path=target.agent_path,
+                identities_only=bool(target.client_public_key),
                 passphrase=passphrase,
+                interactive=active_prompter is not None,
                 known_hosts=known_hosts,
                 client_factory=client_factory,
                 server_host_key_algs=server_host_key_algs,
