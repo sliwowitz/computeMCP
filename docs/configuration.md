@@ -465,12 +465,12 @@ partial GPU/CPU override conflicts with `multi-node = "full"`.
 ## 12. `[targets.<name>.container]`
 
 Describes the development-container runtime the gateway provisions. Present
-when the gateway manages a container (apptainer or docker) on the login
+when the gateway manages a container (apptainer, docker or podman) on the login
 or compute node. `runtime` is the only required key.
 
 | Keyword | Required / optional | Type | Description | Allowed values / example | Default |
 |---|---|---|---|---|---|
-| `runtime` | required (when this block is present) | string | Container runtime used to provision the development environment. | `"apptainer"` / `"docker"` | required |
+| `runtime` | required (when this block is present) | string | Container runtime used to provision the development environment. | `"apptainer"` / `"docker"` / `"podman"` | required |
 | `storage-root` | optional | string | Storage root visible to both login and compute nodes where apptainer pulls or caches its container. Non-empty. | e.g. `"/scratch/aaa/computemcp"` | not set (no default; pass-through) |
 | `image` | optional | string | Container image reference to pull/use. Non-empty. | e.g. `"nvcr.io/nvidia/apptainer:2310"` | not set (no default; pass-through) |
 | `gpus` | optional | array of strings | GPU vendors the container can expose. Must be a subset of `nvidia`, `amd`, `intel`; duplicates are preserved in first-seen order. Empty means no GPU passthrough. | e.g. `["nvidia"]`, `["nvidia", "amd"]` | `()` (no GPU passthrough) |

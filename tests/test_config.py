@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 import textwrap
@@ -1180,7 +1181,7 @@ def test_container_requires_runtime():
 
 def test_container_runtime_enum():
     with pytest.raises(ConfigError, match="apptainer"):
-        parse_config(base_raw(container={"runtime": "podman"}))
+        parse_config(base_raw(container={"runtime": "containerd"}))
     assert (
         parse_config(base_raw(container={"runtime": "docker"}))
         .targets["hal"]

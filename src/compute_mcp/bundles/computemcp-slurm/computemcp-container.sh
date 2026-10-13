@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: ISC
 # computeMCP container runtime dispatcher.
 #
 # Actions: build | configure | update | start | stop | close | shell | fingerprint | endpoint
 #
-# The runtime is selected by COMPUTEMCP_CONTAINER_RUNTIME (apptainer|docker).
+# The runtime is selected by COMPUTEMCP_CONTAINER_RUNTIME (apptainer|docker|podman).
 # Every path, name and resource comes from the COMPUTEMCP_* environment that
 # the gateway injects; nothing is tied to a specific site.  This file is the
 # only place that knows how to build/configure/start a container.  The Slurm
@@ -109,7 +112,7 @@ IMAGE="$(normalize_image "$IMAGE")"
 CONTAINER_PORT="${COMPUTEMCP_CONTAINER_PORT:-2222}"
 SSH_WAIT_SECONDS="${COMPUTEMCP_SSH_WAIT_SECONDS:-120}"
 
-# Docker-only defaults.  The gateway never needs to know these.
+# Docker/Podman defaults.  The gateway never needs to know these.
 SSH_USER="${COMPUTEMCP_SSH_USER:-ubuntu}"
 if ! { [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] && [ "$SSH_USER" != root ]; }; then
     echo "Invalid COMPUTEMCP_SSH_USER: $SSH_USER" >&2
@@ -128,8 +131,8 @@ if ! { [[ "$SYSTEM" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ "$SYSTEM" != . ] && 
     exit 2
 fi
 case "$RUNTIME" in
-    apptainer|docker) ;;
-    "") echo 'COMPUTEMCP_CONTAINER_RUNTIME must be apptainer or docker.' >&2; exit 2 ;;
+    apptainer|docker|podman) ;;
+    "") echo 'COMPUTEMCP_CONTAINER_RUNTIME must be apptainer, docker or podman.' >&2; exit 2 ;;
     *) echo "Unsupported container runtime: $RUNTIME" >&2; exit 2 ;;
 esac
 # Environment hygiene for the Apptainer path.  A bind list inherited from the
@@ -633,14 +636,14 @@ apptainer_fingerprint() {
 }
 
 # ---------------------------------------------------------------------------
-# Docker runtime
+# Shared Docker/Podman runtime
 # ---------------------------------------------------------------------------
-DOCKER_CMD=(docker)
+DOCKER_CMD=("$RUNTIME")
 
 docker_entrypoint_content() {
     cat <<'ENTRYPOINT'
 #!/usr/bin/env bash
-# Runs as real root INSIDE Docker, never on the host.
+# Runs as root inside the container, never on the host.
 set -euo pipefail
 : "${AGENT_UID:?}" "${AGENT_GID:?}" "${SSH_USER:?}" "${CONTAINER_PORT:?}"
 [[ "$AGENT_UID" =~ ^[0-9]+$ && "$AGENT_GID" =~ ^[0-9]+$ ]] && (( AGENT_UID > 0 ))
@@ -724,7 +727,7 @@ X11Forwarding no
 PermitTunnel no
 Subsystem sftp internal-sftp
 SSHD
-# Register libraries injected by NVIDIA's Docker runtime for SSH sessions.
+# Register injected NVIDIA libraries for SSH sessions.
 ldconfig
 /usr/sbin/sshd -t -f /etc/ssh/sshd_config_computemcp
 exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config_computemcp
@@ -744,7 +747,7 @@ docker_check_owner() {
 }
 
 docker_build_image() {
-    [ -n "$IMAGE" ] || { echo 'COMPUTEMCP_IMAGE is required to build a Docker image.' >&2; exit 1; }
+    [ -n "$IMAGE" ] || { echo 'COMPUTEMCP_IMAGE is required to build a container image.' >&2; exit 1; }
     local BASE_IMAGE="${IMAGE#docker://}" CONTEXT
     CONTEXT="$(mktemp -d "$STATE/build.XXXXXX")"
     docker_entrypoint_content > "$CONTEXT/computemcp-entrypoint"
@@ -791,11 +794,11 @@ docker_install_entrypoint() {
 
 docker_create_container() {
     "${DOCKER_CMD[@]}" image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 || {
-        echo 'Missing derived Docker image; run build first.' >&2
+        echo 'Missing derived container image; run build first.' >&2
         exit 1
     }
     install_authorized_key
-    local ARGS AGENT_UID AGENT_GID CPUS
+    local ARGS AGENT_UID AGENT_GID CPUS HOME_MOUNT
     CPUS="${COMPUTEMCP_CPUS_PER_NODE:-$LEGACY_CPUS}"
     if ! { [[ "$CPUS" =~ ^[0-9]+$ ]] && (( CPUS > 0 )); }; then
         echo "Invalid CPU count: $CPUS" >&2
@@ -804,16 +807,30 @@ docker_create_container() {
     AGENT_UID="$(stat -c %u "$HOST_HOME")"
     AGENT_GID="$(stat -c %g "$HOST_HOME")"
     printf 'Container home will use %s (uid:gid %s:%s)\n' "$HOST_HOME" "$AGENT_UID" "$AGENT_GID" >&2
+    HOME_MOUNT="type=bind,src=$HOST_HOME,dst=/home/$SSH_USER"
+    if [ "$RUNTIME" = podman ]; then HOME_MOUNT+=",relabel=private"; fi
     ARGS=(--name "$NAME" --restart "$DOCKER_RESTART"
         --label "org.computemcp.owner-uid=$(id -u)" --label "org.computemcp.system=$SYSTEM"
         --publish "127.0.0.1::$CONTAINER_PORT"
-        --mount "type=bind,src=$HOST_HOME,dst=/home/$SSH_USER"
+        --mount "$HOME_MOUNT"
         --env "AGENT_UID=$AGENT_UID" --env "AGENT_GID=$AGENT_GID"
         --env "SSH_USER=$SSH_USER" --env "CONTAINER_PORT=$CONTAINER_PORT")
     [ -z "${COMPUTEMCP_MEMORY_PER_NODE_MIB:-}" ] || ARGS+=(--memory "${COMPUTEMCP_MEMORY_PER_NODE_MIB}m")
     [ -n "${COMPUTEMCP_MEMORY_PER_NODE_MIB:-}" ] || { [ -z "$LEGACY_MEMORY" ] || ARGS+=(--memory "$LEGACY_MEMORY"); }
     ARGS+=(--cpus "$CPUS")
-    if has_vendor nvidia; then ARGS+=(--gpus all); fi
+    if [ "$RUNTIME" = podman ]; then
+        # Keep workspace ownership on the host, but let the entrypoint set up sshd.
+        ARGS+=(--userns keep-id --user root)
+    fi
+    if has_vendor nvidia; then
+        if [ "$RUNTIME" = podman ]; then
+            # CDI replaces the legacy NVIDIA hook; do not enable both via the image env.
+            ARGS+=(--device nvidia.com/gpu=all --security-opt label=disable
+                --env NVIDIA_VISIBLE_DEVICES=void)
+        else
+            ARGS+=(--gpus all)
+        fi
+    fi
     local DEVICE GID
     local -A DEVICE_GROUPS=()
     if has_vendor amd; then
@@ -889,7 +906,7 @@ case "$RUNTIME" in
                 ;;
         esac
         ;;
-    docker)
+    docker|podman)
         for CMD in "${DOCKER_CMD[0]}" python3; do command -v "$CMD" >/dev/null; done
         "${DOCKER_CMD[@]}" info >/dev/null
         case "$ACTION" in

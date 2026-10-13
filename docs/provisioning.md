@@ -52,7 +52,7 @@ source = "computemcp-container"
 # provision-env = ["module load apptainer"] # one shell line per array entry
 
 [targets.example.container]
-runtime = "apptainer"                       # or "docker"
+runtime = "apptainer"                       # or "docker" / "podman"
 storage-root = "/scratch/USER/computemcp"
 image = "docker://ubuntu:24.04"
 gpus = ["nvidia"]                           # subset of nvidia, amd, intel
@@ -75,7 +75,7 @@ opt back into manual management.
 
 Login-node prerequisites: Slurm client tools (`sbatch`, `squeue`, `scancel`,
 `srun`), Bash, `flock`, `python3`, and the selected runtime (`apptainer` or
-`docker`). Compute nodes need the same runtime and `python3`.
+`docker` or `podman`). Compute nodes need the same runtime and `python3`.
 
 ### 1.3 What the helper does
 
@@ -165,6 +165,36 @@ the helper detects the absence of Slurm tools, skips the submission path,
 builds or reuses the container on the route (login) node, starts it there, and
 prints `ENDPOINT 127.0.0.1:<relay-port>` through the relay.
 See [`../examples/non-slurm-docker-host.toml`](../examples/non-slurm-docker-host.toml).
+
+#### Podman
+
+Use the same bundle with `runtime = "podman"`. Run the route account as a
+normal user with rootless Podman configured (subordinate UID/GID ranges and
+cgroup v2 resource delegation). Use a dedicated `storage-root`, not your
+desktop home. The shared image build installs sshd; Podman publishes its
+port only on loopback. `keep-id` preserves workspace ownership, while the
+entrypoint runs as container root to configure sshd and the non-root login.
+
+```toml
+[targets.myTargetHost.container]
+runtime = "podman"
+storage-root = "$HOME/computemcp"
+image = "docker.io/library/ubuntu:24.04"
+# gpus = ["nvidia"]
+```
+
+Use fully qualified image names to avoid registry-selection prompts. For CUDA
+compilation, select an Ubuntu-based CUDA **devel** image. NVIDIA GPUs use
+[CDI](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)
+(`nvidia.com/gpu=all`); install the host driver/toolkit and verify
+`nvidia-ctk cdi list` first. This GPU path disables container SELinux labeling
+and disables the legacy NVIDIA hook via `NVIDIA_VISIBLE_DEVICES=void`.
+CPU-only containers retain labeling and privately relabel their workspace.
+Rootless GPU device permissions must allow the container login user access;
+host supplementary-group membership alone is not enough after sshd switches users.
+
+Provisioning still runs through the configured SSH route, even when that
+route points back to the gateway host. Local provisioning is separate work.
 
 ---
 
@@ -298,9 +328,9 @@ or manual). Keys:
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `runtime` | `"apptainer"` or `"docker"` | Required when the block is present. |
+| `runtime` | `"apptainer"`, `"docker"` or `"podman"` | Required when the block is present. |
 | `storage-root` | string | Base for state, sandbox, and home directories. The default for `bundle.deploy-dir` derives from this. |
-| `image` | string | Base image. `docker://<ref>` for Apptainer, plain reference for Docker. |
+| `image` | string | Base image. `docker://<ref>` for Apptainer, plain reference for Docker/Podman. |
 | `gpus` | string array | Subset of `nvidia`, `amd`, `intel`. Missing device nodes are reported and skipped. |
 | `host-home` | string | Host directory carrying `.ssh/authorized_keys` that the container trusts. |
 | `sandbox` | boolean | Informational flag; the helper reads the actual sandbox path. |
@@ -373,7 +403,7 @@ array.
 
 | Variable | Value |
 | --- | --- |
-| `COMPUTEMCP_CONTAINER_RUNTIME` | `apptainer` or `docker`, from `container.runtime`. |
+| `COMPUTEMCP_CONTAINER_RUNTIME` | `apptainer`, `docker` or `podman`, from `container.runtime`. |
 | `COMPUTEMCP_STORAGE_ROOT` | `container.storage-root`. |
 | `COMPUTEMCP_IMAGE` | `container.image`. |
 | `COMPUTEMCP_GPU_VENDORS` | Comma-joined `container.gpus`. |

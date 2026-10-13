@@ -370,10 +370,10 @@ client_key = "/home/USER/.ssh/computemcp_container"
 # nodes = "nodes"
 # cpus-per-node = "cpus-per-task"
 #
-# # Container runtime for the provisioning bundle. `runtime` is apptainer or
-# # docker. `storage-root` is the base for the sandbox, home, and state dirs;
+# # Container runtime for the provisioning bundle: apptainer, docker or podman.
+# # `storage-root` is the base for the sandbox, home, and state dirs;
 # # the bundle default is $HOME/.local/share/computemcp. `image` is the base
-# # (docker://<ref> for Apptainer, plain reference for Docker). `gpus` is a
+# # (docker://<ref> for Apptainer, plain reference for Docker/Podman). `gpus` is a
 # # vendor list (subset of nvidia, amd, intel). `host-home` is the host dir whose
 # # .ssh/authorized_keys the container trusts. `sandbox` is informational.
 # # `build-location` is "login" (default) or "compute": "login" builds the

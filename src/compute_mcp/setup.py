@@ -41,7 +41,7 @@ from .config import (
 )
 
 GPU_VENDORS = ("nvidia", "amd", "intel")
-CONTAINER_RUNTIMES = ("apptainer", "docker")
+CONTAINER_RUNTIMES = ("apptainer", "docker", "podman")
 TRANSPORTS = ("tunnel", "direct")
 # OpenSSH Host aliases are arbitrary tokens; reject whitespace and glob/negation
 # metacharacters that `ssh -G` would interpret specially.
@@ -490,6 +490,8 @@ def render_target_block(answers: TargetAnswers) -> str:
                     "image",
                     "docker://ubuntu:24.04"
                     if answers.container_runtime == "apptainer"
+                    else "docker.io/library/ubuntu:24.04"
+                    if answers.container_runtime == "podman"
                     else "ubuntu:24.04",
                 )
             )
@@ -853,12 +855,14 @@ def collect_target(wizard: Wizard, existing: set[str]) -> TargetAnswers:
         default_image = (
             "docker://ubuntu:24.04"
             if answers.container_runtime == "apptainer"
+            else "docker.io/library/ubuntu:24.04"
+            if answers.container_runtime == "podman"
             else "ubuntu:24.04"
         )
         answers.container_image = wizard.ask(
             "Base image",
             description="docker:// registry ref for Apptainer (repeated "
-            "prefix collapsed), plain ref for Docker",
+            "prefix collapsed), plain ref for Docker/Podman",
             default=default_image,
         )
         vendors = wizard.ask(

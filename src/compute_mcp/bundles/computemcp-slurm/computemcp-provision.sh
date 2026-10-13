@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: ISC
 # computeMCP Slurm provisioning entry point, run on the Slurm login node.
 #
 # Actions: provision (default) | stop | close | shell | status
@@ -321,7 +324,7 @@ if [ "$ACTION" = stop ] || [ "$ACTION" = close ] || [ "$ACTION" = status ]; then
     if [ -z "$RUNTIME" ] && [ -s "$STATE/container.runtime" ]; then
         RECORDED_RUNTIME="$(head -n 1 "$STATE/container.runtime" || true)"
         case "$RECORDED_RUNTIME" in
-            apptainer|docker) RUNTIME="$RECORDED_RUNTIME" ;;
+            apptainer|docker|podman) RUNTIME="$RECORDED_RUNTIME" ;;
         esac
     fi
     if [ -z "$RUNTIME" ]; then
@@ -329,6 +332,8 @@ if [ "$ACTION" = stop ] || [ "$ACTION" = close ] || [ "$ACTION" = status ]; then
             RUNTIME=docker
         elif command -v apptainer >/dev/null 2>&1; then
             RUNTIME=apptainer
+        elif command -v podman >/dev/null 2>&1; then
+            RUNTIME=podman
         fi
     fi
     export COMPUTEMCP_CONTAINER_RUNTIME="$RUNTIME"
@@ -374,10 +379,10 @@ resolve_container_endpoint() {
         is_valid_endpoint "$CACHED" || CACHED=""
     fi
     case "$RUNTIME" in
-        docker)
+        docker|podman)
             # Query the daemon first; it knows the current published port even
             # after a daemon restart changed it.
-            if command -v docker >/dev/null 2>&1; then
+            if command -v "$RUNTIME" >/dev/null 2>&1; then
                 while IFS= read -r LINE; do
                     if is_valid_endpoint "$LINE"; then
                         if [ "$LINE" != "$CACHED" ]; then
@@ -386,7 +391,7 @@ resolve_container_endpoint() {
                         printf '%s\n' "$LINE"
                         return 0
                     fi
-                done < <(docker container port "$NAME" "$CONTAINER_PORT/tcp" 2>/dev/null || true)
+                done < <("$RUNTIME" container port "$NAME" "$CONTAINER_PORT/tcp" 2>/dev/null || true)
             fi
             # Daemon unavailable: fall back to the cached mapping, then to the
             # container port.
@@ -494,11 +499,12 @@ fi
 runtime_tool() {
     case "$RUNTIME" in
         apptainer) command -v apptainer >/dev/null || { echo 'apptainer not found.' >&2; exit 1; } ;;
-        docker)    command -v docker >/dev/null    || { echo 'docker not found.' >&2; exit 1; } ;;
+        docker|podman)    command -v "$RUNTIME" >/dev/null || { echo "$RUNTIME not found." >&2; exit 1; } ;;
         *)
             if command -v apptainer >/dev/null; then RUNTIME=apptainer
             elif command -v docker >/dev/null; then RUNTIME=docker
-            else echo 'Set COMPUTEMCP_CONTAINER_RUNTIME to apptainer or docker.' >&2; exit 1
+            elif command -v podman >/dev/null; then RUNTIME=podman
+            else echo 'Set COMPUTEMCP_CONTAINER_RUNTIME to apptainer, docker or podman.' >&2; exit 1
             fi
             export COMPUTEMCP_CONTAINER_RUNTIME="$RUNTIME"
             ;;
@@ -507,7 +513,7 @@ runtime_tool() {
 container_missing() {
     case "$RUNTIME" in
         apptainer) [ ! -d "$SANDBOX" ] ;;
-        docker)    ! docker image inspect "${NAME,,}:latest" >/dev/null 2>&1 ;;
+        docker|podman)    ! "$RUNTIME" image inspect "${NAME,,}:latest" >/dev/null 2>&1 ;;
         *) return 1 ;;
     esac
 }
@@ -567,9 +573,9 @@ container_state() {
             [ -d "$SANDBOX" ] && return 1
             return 2
             ;;
-        docker)
-            if docker container inspect "$NAME" >/dev/null 2>&1; then
-                [ "$(docker container inspect --format '{{.State.Running}}' "$NAME")" = true ] && return 0
+        docker|podman)
+            if "$RUNTIME" container inspect "$NAME" >/dev/null 2>&1; then
+                [ "$("$RUNTIME" container inspect --format '{{.State.Running}}' "$NAME")" = true ] && return 0
                 return 1
             fi
             return 2
