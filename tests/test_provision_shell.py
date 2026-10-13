@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """End-to-end regression tests for the Slurm bundle shell helpers.
@@ -615,7 +616,8 @@ def _base_env(system: str, storage_root: Path, port: int) -> dict:
 # --- tests -----------------------------------------------------------------
 
 
-def test_slurm_mode_submits_job_and_reports_relay_endpoint(tmp_path, stubs):
+@pytest.mark.parametrize("runtime", ("docker", "podman"))
+def test_slurm_mode_submits_job_and_reports_relay_endpoint(tmp_path, stubs, runtime):
     """Slurm present: sbatch is invoked and the relay port is the endpoint.
 
     The stub scheduler background-launches the batch script (like a fast
@@ -632,6 +634,12 @@ def test_slurm_mode_submits_job_and_reports_relay_endpoint(tmp_path, stubs):
     state_dir = storage / "casetest" / "state"
 
     env = _base_env("casetest", storage, container_port)
+    env["COMPUTEMCP_CONTAINER_RUNTIME"] = runtime
+    if runtime == "podman":
+        _write_stub(
+            stubs.slurm.bin / "podman",
+            DOCKER_STUB.replace("printf 'docker %s\\n'", "printf 'podman %s\\n'"),
+        )
     env["COMPUTEMCP_FORWARD_PORT"] = str(forward_port)
     env["SLURM_STUB_LOG"] = str(workdir / "slurm.log")
     env["DOCKER_STUB_LOG"] = str(workdir / "docker.log")
@@ -677,6 +685,8 @@ def test_slurm_mode_submits_job_and_reports_relay_endpoint(tmp_path, stubs):
         settings = state_dir / "srun-casetest.settings"
         assert settings.exists()
         assert "COMPUTEMCP_PROVISION_ENV" in settings.read_text()
+        assert f"COMPUTEMCP_CONTAINER_RUNTIME={runtime}" in settings.read_text()
+        assert f"{runtime} start " in (workdir / "docker.log").read_text()
         # The compute node may run the job step with HOME stripped, so the
         # settings file must carry the already-resolved ABSOLUTE storage root.
         # Read it back through bash's own parser to avoid depending on ``%q``
@@ -3234,4 +3244,3 @@ def test_slurm_ready_file_carries_pid_and_port_never_zero(tmp_path, stubs):
         assert check.returncode == 0, (check.returncode, check.stderr)
     finally:
         teardown()
-

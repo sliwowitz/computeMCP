@@ -13,7 +13,7 @@ and starts the container directly on the route node.
 | File | Role |
 | --- | --- |
 | `computemcp-provision.sh` | Login-node entry point: `provision` (default), `stop`, `close`, `shell`, `status` |
-| `computemcp-container.sh` | Runtime dispatcher for `apptainer` and `docker` |
+| `computemcp-container.sh` | Runtime dispatcher for `apptainer`, `docker` and `podman` |
 | `computemcp-job.sh` | Batch script that runs on the compute node and keeps the allocation alive |
 | `computemcp-relay.py` | Loopback relay that carries SSH over `srun` steps |
 
@@ -36,10 +36,13 @@ image, or path is hardcoded either way.
 ## Login-node requirements
 
 Slurm client tools (`sbatch`, `squeue`, `scancel`, `srun`), Bash, `flock`,
-`python3`, and the selected runtime (`apptainer` or `docker`).  The Apptainer
+`python3`, and the selected runtime (`apptainer`, `docker` or `podman`).  The Apptainer
 configure step uses `python3` on the login node, so Python 3 remains a login
 node requirement even though the argument bridge itself is pure Bash.  Compute
 nodes need the same runtime and `python3`.
+
+For rootless Podman and NVIDIA CDI prerequisites, see
+[Podman provisioning](../../../../docs/provisioning.md#podman).
 
 ## Gateway configuration
 
@@ -73,7 +76,7 @@ ntasks-per-node = 1
 cpu-bind = "none"
 
 [targets.example.container]
-runtime = "apptainer"          # or "docker"
+runtime = "apptainer"          # or "docker" / "podman"
 storage-root = "/scratch/agent/computemcp"
 image = "docker://ubuntu:24.04"
 gpus = ["nvidia"]              # subset of nvidia, amd, intel

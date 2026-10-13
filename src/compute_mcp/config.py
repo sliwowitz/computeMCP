@@ -266,9 +266,9 @@ class ContainerConfig:
     build_location: str = "login"
 
     def __post_init__(self) -> None:
-        if self.runtime not in ("apptainer", "docker"):
+        if self.runtime not in ("apptainer", "docker", "podman"):
             raise ConfigError(
-                f"container.runtime must be 'apptainer' or 'docker', "
+                f"container.runtime must be 'apptainer', 'docker' or 'podman', "
                 f"got {self.runtime!r}"
             )
         for label, value in (
@@ -685,7 +685,7 @@ class TargetConfig:
     # ``allocation`` are the defaults and the single/multi-node policies;
     # ``slurm`` holds the manual sbatch/srun options and their optional
     # calculated-value mappings; ``container`` describes the development
-    # container runtime (apptainer/docker).  Each is optional: a target without
+    # container runtime (apptainer/docker/podman).  Each is optional: a target without
     # a Slurm allocation simply has no such block, as before.
     node: NodeConfig | None = None
     allocation: AllocationConfig | None = None
