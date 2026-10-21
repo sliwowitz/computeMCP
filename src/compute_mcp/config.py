@@ -661,7 +661,7 @@ class TargetConfig:
     # machine over the live route connection to release the target (e.g.
     # ``scancel`` the Slurm job).  It runs on an explicit stop, gateway shutdown
     # and before a refresh, but NOT when a config reload removes a target.
-    # Advisory: a non-zero exit or timeout is logged and teardown proceeds.
+    # Failure aborts refresh; explicit stop and shutdown remain best-effort.
     close_command: tuple[str, ...] = ()
     close_command_timeout: float = 120.0
     # Optional trusted recovery command (argv, no shell) that runs ON THE REMOTE

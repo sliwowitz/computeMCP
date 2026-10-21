@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: ISC
 import asyncio
+import shlex
 import socket
 
 import pytest
@@ -671,7 +672,7 @@ async def test_bundle_target_deploys_and_runs_derived_argv(monkeypatch):
     try:
         assert deployed == ["/scratch/agent/computemcp/bundle"]
         provision = next(c for c in commands if "computemcp-provision.sh" in c)
-        assert provision.endswith(
+        assert shlex.split(provision)[-1].endswith(
             "/scratch/agent/computemcp/bundle/computemcp-provision.sh provision"
         )
         assert tunnel.provisioned_endpoint == ("cn9", 4321)
@@ -707,7 +708,7 @@ async def test_close_command_derives_bundle_stop_when_unset(monkeypatch):
             return _FakeRunResult(0, b"", b"")
 
     await mgr.run_close_command(target, "rosi", connection=_Conn())
-    assert seen and seen[0].endswith(
+    assert seen and shlex.split(seen[0])[-1].endswith(
         "/scratch/agent/computemcp/bundle/computemcp-provision.sh stop"
     )
 
@@ -760,7 +761,7 @@ async def test_close_command_bundle_prefixes_provision_env():
         target, "rosi", connection=_Conn(), provision_env=env
     )
     assert len(seen) == 1
-    command = seen[0]
+    command = shlex.split(seen[0])[-1]
     assert "export COMPUTEMCP_CONTAINER_RUNTIME=apptainer;" in command
     assert "export COMPUTEMCP_STATE_DIR=/scratch/agent/computemcp/rosi/state;" in command
     assert "export COMPUTEMCP_SYSTEM=rosi;" in command
@@ -770,8 +771,8 @@ async def test_close_command_bundle_prefixes_provision_env():
     )
 
 
-async def test_run_close_command_without_provision_env_unchanged():
-    """An explicit close_command with no env keeps the previous exact shape."""
+async def test_run_close_command_without_provision_env_preserves_argv():
+    """An explicit close_command keeps its argv inside the timeout wrapper."""
     import dataclasses
 
     mgr = TunnelManager(SSHConfig(internal_port_min=31600, internal_port_max=31610))
@@ -786,7 +787,7 @@ async def test_run_close_command_without_provision_env_unchanged():
             return _FakeRunResult(0, b"", b"")
 
     await mgr.run_close_command(target, "hal", connection=_Conn())
-    assert seen == ["scancel --name x"]
+    assert shlex.split(seen[0])[-1] == "scancel --name x"
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +830,7 @@ async def test_run_connect_command_exception_is_logged_not_raised(caplog):
 
 
 # ---------------------------------------------------------------------------
-# run_close_command (advisory release, never fatal)
+# run_close_command (release failures must reach refresh)
 # ---------------------------------------------------------------------------
 
 async def test_run_close_command_runs_shlex_quoted_with_timeout():
@@ -852,12 +853,12 @@ async def test_run_close_command_runs_shlex_quoted_with_timeout():
     assert len(seen) == 1
     command, kwargs = seen[0]
     # argv is shlex-quoted (the embedded space is protected).
-    assert command == "scancel --name 'my job'"
-    assert kwargs["timeout"] == 45.0
+    assert shlex.split(command)[-1] == "scancel --name 'my job'"
+    assert kwargs["timeout"] == 50.0
     assert kwargs["check"] is False
 
 
-async def test_run_close_command_nonzero_exit_is_not_raised(caplog):
+async def test_run_close_command_nonzero_exit_is_raised():
     import dataclasses
 
     mgr = TunnelManager(SSHConfig(internal_port_min=31670, internal_port_max=31680))
@@ -869,22 +870,19 @@ async def test_run_close_command_nonzero_exit_is_not_raised(caplog):
         async def run(self, command, **kwargs):
             return _FakeRunResult(9, b"out\n", b"nope\n")
 
-    with caplog.at_level("WARNING"):
+    with pytest.raises(TunnelError, match="close_command exited 9: nope"):
         await mgr.run_close_command(target, "hal", connection=_Conn())
-    assert "exited 9" in caplog.text
-    assert "nope" in caplog.text
 
 
-async def test_run_close_command_without_connection_is_noop(caplog):
+async def test_run_close_command_without_connection_fails():
     import dataclasses
 
     mgr = TunnelManager(SSHConfig(internal_port_min=31680, internal_port_max=31690))
     target = dataclasses.replace(
         make_target("hal", ["hal"]), close_command=("scancel",)
     )
-    with caplog.at_level("WARNING"):
+    with pytest.raises(TunnelError, match="no live route connection"):
         await mgr.run_close_command(target, "hal", connection=None)
-    assert "without a live route connection" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1069,3 +1067,23 @@ async def test_dial_hop_empty_user_uses_asyncssh_sentinel(monkeypatch):
         fallback_user="",
     )
     assert seen["username"] == ()
+
+
+@pytest.mark.parametrize("status", [124, 137])
+async def test_close_timeout_reports_target_operation_and_deadline(status):
+    import dataclasses
+
+    target = dataclasses.replace(
+        make_target("hal", ["hal"]),
+        close_command=("false",),
+        close_command_timeout=45,
+    )
+
+    class TimedOutRoute:
+        async def run(self, command, **kwargs):
+            return _FakeRunResult(status, b"", b"")
+
+    with pytest.raises(TunnelError, match="target hal: close_command.*timeout limit: 45s"):
+        await TunnelManager(SSHConfig()).run_close_command(
+            target, "hal", connection=TimedOutRoute(),
+        )

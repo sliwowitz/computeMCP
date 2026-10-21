@@ -226,3 +226,47 @@ def test_runtime_preserves_parent_locks_without_inheriting_them(runtime_env, tmp
     for path in (job_lock, provision_lock):
         with path.open("r+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_busy_provisioner_fails_without_starting_runtime(runtime_env, tmp_path):
+    """Contention is reported promptly, independently of allocation wait time."""
+    state = tmp_path / "storage" / TARGET / "state"
+    state.mkdir(parents=True)
+    lock_path = state / "provision.lock"
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        result = subprocess.run(
+            ["bash", str(PROVISION), "provision"],
+            env=runtime_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    assert result.returncode == 75
+    assert f"Target {TARGET} busy" in result.stderr
+    assert str(lock_path) in result.stderr
+    assert "within 10s" in result.stderr
+    assert not (tmp_path / "runtime.log").exists()
+
+
+def test_runtime_stop_failure_reaches_provisioner(runtime_env, tmp_path, stubs):
+    """Refresh can only fail closed if the bundle reports runtime failures."""
+    _run(PROVISION, "provision", runtime_env)
+    runtime = stubs.direct.bin / runtime_env["COMPUTEMCP_CONTAINER_RUNTIME"]
+    source = runtime.read_text()
+    assert "    stop)\n" in source
+    runtime.write_text(
+        source.replace(
+            "    stop)\n",
+            '    stop)\n        echo "runtime stop failed" >&2; exit 23\n',
+        )
+    )
+    result = subprocess.run(
+        ["bash", str(PROVISION), "stop"],
+        env=runtime_env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 23
+    assert "runtime stop failed" in result.stderr

@@ -50,6 +50,50 @@ class TunnelError(RuntimeError):
     pass
 
 
+# Let the remote deadline fire before the SSH-side safety deadline.
+_REMOTE_REPLY_GRACE = 5
+
+
+async def _run_bounded_command(
+    connection: asyncssh.SSHClientConnection,
+    command: str,
+    timeout: float,
+) -> asyncssh.SSHCompletedProcess[bytes]:
+    """Bound the remote process group, not just the SSH client's wait.
+
+    GNU timeout kills the helper group at its deadline even if SSH disconnects.
+    Detached runtime monitors and scheduler allocations are not in this group.
+    """
+    wrapped = shlex.join(
+        [
+            "exec",
+            "timeout",
+            "--signal=KILL",
+            f"{timeout:g}s",
+            "bash",
+            "-c",
+            command,
+        ]
+    )
+    try:
+        result = await connection.run(
+            wrapped,
+            check=False,
+            encoding=None,
+            timeout=timeout + _REMOTE_REPLY_GRACE,
+        )
+    except TimeoutError as exc:
+        raise TunnelError(
+            f"remote command exceeded {timeout:g}s; cleanup could not be confirmed"
+        ) from exc
+    signal_name = (getattr(result, "exit_signal", None) or (None,))[0]
+    if result.exit_status in (124, 137) or signal_name == "KILL":
+        raise TunnelError(
+            f"remote command timed out or was killed (timeout limit: {timeout:g}s)"
+        )
+    return result
+
+
 # Mirrors ``gateway._parse_provision_endpoint``.  Duplicated here (rather than
 # imported) to avoid a circular import: gateway imports tunnel, so tunnel must
 # not import gateway at module load time.
@@ -613,13 +657,10 @@ class TunnelManager:
                 target.name, route, " ".join(argv_tuple),
             )
             try:
-                result = await conn.run(
-                    command,
-                    check=False,
-                    timeout=target.provision_timeout,
-                    encoding=None,
+                result = await _run_bounded_command(
+                    conn, command, target.provision_timeout
                 )
-            except (asyncssh.Error, OSError, asyncio.TimeoutError) as exc:
+            except (asyncssh.Error, OSError, TunnelError) as exc:
                 for opened_conn in reversed(opened):
                     await _close_connection(opened_conn)
                 raise TunnelError(
@@ -678,7 +719,7 @@ class TunnelManager:
             provisioned_endpoint=provisioned,
         )
 
-    async def _run_advisory_command(
+    async def _run_route_command(
         self,
         label: str,
         argv: tuple[str, ...],
@@ -687,22 +728,28 @@ class TunnelManager:
         route: str,
         connection: asyncssh.SSHClientConnection | None,
         provision_env: dict[str, str] | None = None,
+        *,
+        required: bool = False,
     ) -> None:
-        """Run a trusted advisory command on the remote route host.
+        """Run a trusted stop or recovery command on the remote route host.
 
         The command runs on the REMOTE side of the live route connection (the
         machine that hosts the development container) so the gateway can
-        forward stdout/stderr.  Exit status and output are logged but never
-        fatal: the caller decides what to do next.
+        forward stdout/stderr. Required stop hooks raise on failure; recovery
+        hooks only log it.
 
         ``provision_env`` mirrors the provision path: for a bundle target the
         derived ``stop`` argv needs the same ``COMPUTEMCP_*`` environment, so it
         is rendered as shell-quoted exports and prefixed to the command.
 
         Callers must pass the live ``connection`` (the route connection stored
-        on the tunnel).  When it is missing the call is a logged no-op.
+        on the tunnel). Missing connections fail required hooks.
         """
+        if not argv:
+            return
         if connection is None:
+            if required:
+                raise TunnelError(f"target {target.name}: {label} has no live route connection")
             log.warning(
                 "target %s: %s requested without a live route connection",
                 target.name, label,
@@ -716,13 +763,15 @@ class TunnelManager:
             target.name, label, route, " ".join(argv),
         )
         try:
-            result = await connection.run(
-                command,
-                check=False,
-                timeout=timeout,
-                encoding=None,
-            )
-        except Exception as exc:  # noqa: BLE001 - advisory, never fatal
+            if required:
+                result = await _run_bounded_command(connection, command, timeout)
+            else:
+                result = await connection.run(
+                    command, check=False, timeout=timeout, encoding=None,
+                )
+        except Exception as exc:  # noqa: BLE001 - contextualize required hooks
+            if required:
+                raise TunnelError(f"target {target.name}: {label} failed: {exc}") from exc
             log.warning(
                 "target %s: %s failed: %s", target.name, label, exc
             )
@@ -736,6 +785,10 @@ class TunnelManager:
             )
         if result.exit_status != 0:
             detail = stderr.decode(errors="replace").strip() or "no stderr"
+            if required:
+                raise TunnelError(
+                    f"target {target.name}: {label} exited {result.exit_status}: {detail}"
+                )
             log.warning(
                 "target %s: %s exited %s: %s",
                 target.name, label, result.exit_status, detail,
@@ -765,7 +818,7 @@ class TunnelManager:
         ``connection`` (the route connection stored on the tunnel).  When it is
         missing the call is a logged no-op.
         """
-        await self._run_advisory_command(
+        await self._run_route_command(
             "connect_command",
             target.connect_command,
             target.connect_command_timeout,
@@ -786,9 +839,8 @@ class TunnelManager:
 
         The command runs on the REMOTE side of the live route connection to
         release the target (e.g. ``scancel`` the Slurm job) before the tunnel is
-        torn down.  Exit status and output are advisory: a non-zero exit or
-        timeout is logged and teardown still proceeds.  When there is no live
-        ``connection`` the call is a logged no-op.
+        torn down. Failures raise TunnelError: refresh must not provision a new
+        allocation if the old one could not be released.
 
         ``provision_env`` carries the ``COMPUTEMCP_*`` contract for a derived
         bundle ``stop``; without it the helper would exit because an empty
@@ -796,22 +848,11 @@ class TunnelManager:
         """
         argv = target.close_command
         if not argv and target.bundle is not None and connection is not None:
-            # Resolve $HOME for the derived bundle stop; a failure here is
-            # advisory (teardown still proceeds).
-            try:
-                resolved = await bundle_module.resolve_remote_dir(
-                    connection, bundle_module.resolve_deploy_dir(target)
-                )
-                argv = bundle_module.provision_argv(
-                    target, "stop", deploy_dir=resolved
-                )
-            except Exception as exc:  # noqa: BLE001 - advisory, never fatal
-                log.warning(
-                    "target %s: could not resolve bundle stop path: %s",
-                    target.name, exc,
-                )
-                argv = bundle_module.provision_argv(target, "stop")
-        await self._run_advisory_command(
+            resolved = await bundle_module.resolve_remote_dir(
+                connection, bundle_module.resolve_deploy_dir(target)
+            )
+            argv = bundle_module.provision_argv(target, "stop", deploy_dir=resolved)
+        await self._run_route_command(
             "close_command",
             argv,
             target.close_command_timeout,
@@ -819,6 +860,7 @@ class TunnelManager:
             route,
             connection,
             provision_env,
+            required=True,
         )
 
     async def connect(
