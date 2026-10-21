@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 import asyncio
@@ -3059,20 +3060,22 @@ async def test_failing_close_command_still_stops(monkeypatch, caplog):
     assert result["state"] == "disconnected"
 
 
-async def test_failing_close_command_still_refreshes(monkeypatch, caplog):
+async def test_failing_close_command_aborts_refresh(monkeypatch):
+    from compute_mcp.tunnel import TunnelError
+
     gw, target = _close_gateway()
-    monkeypatch.setattr(gw.backend, "disconnect", _async_noop)
-    monkeypatch.setattr(gw.sessions, "close_for_target", _async_noop_kw)
     rec = {"calls": []}
     _install_fake_connect(monkeypatch, gw, rec)
-    _connect_fake_tunnel(gw, target, object())
+    live = _connect_fake_tunnel(gw, target, object())
     _record_close(gw, monkeypatch, boom=True)
 
-    with caplog.at_level("WARNING"):
-        result = await gw.refresh_target("hal")
+    with pytest.raises(TunnelError, match="close_command failed: close boom"):
+        await gw.refresh_target("hal")
 
-    assert "close_command failed" in caplog.text
-    assert result["state"] == "connected"
+    assert rec["calls"] == []
+    assert gw.runtimes["hal"].tunnel is live
+    assert not live.stopped
+    assert "close boom" in gw.runtimes["hal"].last_error
 
 
 async def test_factor_not_leaked_on_route_dial_failure(monkeypatch, caplog):
@@ -4228,3 +4231,20 @@ async def test_error_middleware_passes_http_exceptions_through():
         await _error_middleware(object(), handler)
     assert excinfo.value.status == 404
     assert excinfo.value.text == "missing"
+
+
+async def test_refresh_aborts_when_stop_route_is_unreachable(monkeypatch):
+    from compute_mcp.tunnel import TunnelError
+
+    gw, _ = _close_gateway()
+    rec = {"calls": []}
+    _install_fake_connect(monkeypatch, gw, rec)
+
+    async def unreachable(*args, **kwargs):
+        raise OSError("login node unreachable")
+
+    monkeypatch.setattr(gw.tunnels, "open_route_connection", unreachable)
+    with pytest.raises(TunnelError, match="close_command route failed"):
+        await gw.refresh_target("hal")
+    assert rec["calls"] == []
+    assert "login node unreachable" in gw.runtimes["hal"].last_error

@@ -85,3 +85,42 @@ Run the script by hand first for any manual `provision_command` or
 target's `last_error`. The full `provision_command` reference script (job
 reuse, wait for the node, login-node forward, `ENDPOINT` output) and the
 `connect_command` guidance live in [provisioning.md](provisioning.md), not here.
+
+## Provisioning is busy or a refresh fails
+
+The bundle waits at most **10 seconds** for its provisioning lock, independently
+of the allocation timeout. A busy error includes the lock path. Let an active
+operation finish before retrying; do not delete the lock file.
+
+Provision and stop commands require **GNU `timeout` and Bash on the route host**.
+At the configured deadline the remote helper process group is killed, including
+waiting children. Detached container monitors and scheduler allocations are not
+killed by this cleanup. The gateway allows another five seconds for the SSH
+reply; a missing reply means cleanup could not be confirmed. Partial build or
+allocation state may remain: inspect it before retrying. A failed stop aborts
+refresh rather than provisioning another allocation. Explicit stop and gateway
+shutdown still perform best-effort gateway-side teardown and log stop failures.
+
+For a stuck Docker/Podman target (including locks inherited by older versions):
+
+1. Stop the gateway to prevent further attempts.
+2. On the **route host**, as the provisioning user, inspect the reported lock:
+   ```bash
+   target=kosmos-alpaka-dev                  # your target name
+   lock="$HOME/computemcp/$target/state/provision.lock"  # adjust storage root
+   sudo fuser -v "$lock"
+   ps -u "$USER" -o pid,ppid,stat,args
+   ```
+3. If helpers are abandoned, send `kill -TERM` only to their freshly verified
+   Bash/flock PIDs. `fuser` lists open descriptors, not necessarily lock owners;
+   do not kill every listed process or kill `conmon` directly.
+4. If an old container monitor still holds the lock, stop that container normally
+   (this interrupts its workloads, but does not remove its storage):
+   ```bash
+   podman stop --time 10 "computemcp-$(id -u)-$target"  # docker for Docker targets
+   sudo fuser -v "$lock"                            # should now be empty
+   ```
+5. Install the current gateway, restart it, then run
+   `computeMCP-gatewayctl target-connect "$target"`. The updated bundle deploys
+   automatically. For Slurm, inspect the tracked allocation with the scheduler
+   instead of using the container-stop command above.

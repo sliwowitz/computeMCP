@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 """Gateway daemon: target state machine, HTTP API and interactive console."""
@@ -613,7 +614,11 @@ class Gateway:
                 self._resolve_allocation(target, effective)
             # Release the old allocation before provisioning a new one.  The
             # route connection is still alive here, so the command can run.
-            await self._run_close_command(name)
+            try:
+                await self._run_close_command(name, required=True)
+            except TunnelError as exc:
+                runtime.last_error = str(exc)
+                raise
             await self._stop_locked(name)
             # The old allocation is released.  Drop the gateway-side cached
             # container connection so the next exec/session dials the freshly
@@ -707,11 +712,11 @@ class Gateway:
         await self.sessions.close_for_target(name, reason="target stopped")
         return self.runtimes[name].public(self.sessions.count_for_target(name))
 
-    async def _run_close_command(self, name: str) -> None:
+    async def _run_close_command(self, name: str, *, required: bool = False) -> None:
         """Run the target's trusted ``close_command`` on the live route.
 
-        Advisory: a missing connection, a non-zero exit or a timeout is logged
-        and swallowed so teardown still proceeds.  Deliberately NOT part of
+        Refresh requires a successful stop; shutdown and explicit stop remain
+        best-effort so gateway-side teardown can always proceed. Not part of
         ``_stop_locked``: config-reload removal uses ``_stop_locked`` directly
         and must not release the allocation.
         """
@@ -740,7 +745,7 @@ class Gateway:
 
         if connection is not None:
             await self._run_close_on_connection(
-                name, target, route, connection, close_kwargs
+                name, target, route, connection, close_kwargs, required=required
             )
             return
 
@@ -755,12 +760,18 @@ class Gateway:
         # lockout policies.  The config already tells us a factor is required, so
         # we skip the factor-less reconnect and log the manual scancel.
         if target.transport.kind == "direct":
+            if required:
+                raise TunnelError(f"target {name}: close_command has no live route connection")
             log.warning(
                 "target %s: close_command skipped, no live route connection",
                 name,
             )
             return
         if target.interactive_auth:
+            if required:
+                raise TunnelError(
+                    f"target {name}: close_command needs a live authenticated route; connect first"
+                )
             log.warning(
                 "target %s: close_command skipped, interactive_auth requires a "
                 "second factor and the route connection is gone; the allocation "
@@ -773,7 +784,9 @@ class Gateway:
             short_route = await self.tunnels.open_route_connection(
                 target, route, connection_timeout=_CLOSE_ROUTE_TIMEOUT
             )
-        except Exception as exc:  # noqa: BLE001 - advisory, never fatal
+        except Exception as exc:  # noqa: BLE001 - shutdown remains best-effort
+            if required:
+                raise TunnelError(f"target {name}: close_command route failed: {exc}") from exc
             log.warning(
                 "target %s: close_command skipped, could not open a route "
                 "connection: %s",
@@ -783,7 +796,7 @@ class Gateway:
             return
         try:
             await self._run_close_on_connection(
-                name, target, route, short_route, close_kwargs
+                name, target, route, short_route, close_kwargs, required=required
             )
         finally:
             await self._close_route_connection(short_route)
@@ -795,13 +808,19 @@ class Gateway:
         route: str,
         connection: Any,
         close_kwargs: dict[str, Any],
+        *,
+        required: bool,
     ) -> None:
-        """Run the close command over ``connection``; advisory, never raises."""
+        """Require a successful close for refresh; log failures during teardown."""
         try:
             await self.tunnels.run_close_command(
                 target, route, connection=connection, **close_kwargs
             )
-        except Exception as exc:  # noqa: BLE001 - advisory, never fatal
+        except Exception as exc:  # noqa: BLE001 - shutdown remains best-effort
+            if required:
+                if isinstance(exc, TunnelError):
+                    raise
+                raise TunnelError(f"target {name}: close_command failed: {exc}") from exc
             log.warning("target %s: close_command failed: %s", name, exc)
 
     async def _close_route_connection(self, connection: Any) -> None:

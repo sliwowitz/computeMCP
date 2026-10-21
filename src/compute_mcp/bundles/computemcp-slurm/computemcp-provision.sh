@@ -154,6 +154,7 @@ if [ -n "$FORWARD_PORT_OVERRIDE" ]; then
     PORT="$FORWARD_PORT_OVERRIDE"
 fi
 WAIT_SECONDS="${COMPUTEMCP_WAIT_SECONDS:-900}"
+LOCK_WAIT_SECONDS=10
 NODES="${COMPUTEMCP_NODES:-1}"
 
 # --- Slurm detection --------------------------------------------------------
@@ -302,7 +303,10 @@ mkdir -p "$STATE"
 
 # --- Locking and job helpers ------------------------------------------------
 exec 9>"$STATE/provision.lock"
-flock -w "$WAIT_SECONDS" 9
+if ! flock -w "$LOCK_WAIT_SECONDS" 9; then
+    echo "Target $SYSTEM busy: could not acquire $STATE/provision.lock within ${LOCK_WAIT_SECONDS}s. Retry after the active operation finishes; if stuck, inspect holders with fuser -v. Do not delete the lock file." >&2
+    exit 75
+fi
 
 JOBID="$(cat "$STATE/jobid" 2>/dev/null || true)"
 CLUSTER="$(cat "$STATE/cluster" 2>/dev/null || true)"
