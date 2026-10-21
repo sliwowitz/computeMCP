@@ -20,6 +20,10 @@
 set -euo pipefail
 umask 077
 
+# The calling job/provisioner retains its locks. Runtime monitors such as
+# conmon outlive this helper and must not inherit job (8) or provision (9) locks.
+exec 8>&- 9>&-
+
 ACTION="${1:-start}"
 
 case "$ACTION" in

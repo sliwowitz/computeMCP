@@ -342,9 +342,10 @@ case "$CMD" in
             # The container SSH endpoint is reachable inside on the container
             # port and on the host through the published port; the stub serves
             # the banner on both so either check succeeds.
-            nohup python3 "$BANNER_BIN" "$PORT" >"$DIR/banner.out" 2>&1 </dev/null 9>&- &
+            # Inherit descriptors like conmon: production code must close its locks.
+            nohup python3 "$BANNER_BIN" "$PORT" >"$DIR/banner.out" 2>&1 </dev/null &
             echo "$!" > "$DIR/banner.pid"
-            nohup python3 "$BANNER_BIN" "$PUBLISHED" >"$DIR/banner-published.out" 2>&1 </dev/null 9>&- &
+            nohup python3 "$BANNER_BIN" "$PUBLISHED" >"$DIR/banner-published.out" 2>&1 </dev/null &
             echo "$!" > "$DIR/banner-published.pid"
             touch "$DIR/running"
         fi

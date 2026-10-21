@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: ISC
 """Podman configuration and shared lifecycle, using stub CLIs only."""
 
+import fcntl
 import os
 import shlex
 import subprocess
@@ -184,3 +185,44 @@ def test_podman_refuses_foreign_container(runtime_env, tmp_path):
     )
     assert result.returncode != 0
     assert "expected owner/system labels" in result.stderr
+
+
+def test_provision_releases_lock_with_container_running(runtime_env, tmp_path):
+    """A persistent runtime monitor must not keep the provisioner's lock alive."""
+    _run(PROVISION, "provision", runtime_env)
+    lock_path = tmp_path / "storage" / TARGET / "state" / "provision.lock"
+    with lock_path.open("r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_runtime_preserves_parent_locks_without_inheriting_them(runtime_env, tmp_path):
+    """Only the caller owns the job (8) and provisioning (9) lock lifetimes."""
+    _run(CONTAINER, "build", runtime_env)
+    job_lock = tmp_path / "job-run.lock"
+    provision_lock = tmp_path / "provision.lock"
+    result = subprocess.run(
+        [
+            "bash",
+            "-euc",
+            """
+            exec 8>"$1" 9>"$2"
+            flock -n 8
+            flock -n 9
+            bash "$3" start
+            if flock -n "$1" true; then echo 'parent job lock lost' >&2; exit 1; fi
+            if flock -n "$2" true; then echo 'parent provision lock lost' >&2; exit 1; fi
+            """,
+            "lock-owner",
+            str(job_lock),
+            str(provision_lock),
+            str(CONTAINER),
+        ],
+        env=runtime_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    for path in (job_lock, provision_lock):
+        with path.open("r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
