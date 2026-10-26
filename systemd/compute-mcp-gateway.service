@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: René Widera
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 #
 # SPDX-License-Identifier: ISC
 [Unit]
@@ -18,9 +19,11 @@ ExecStart=%h/.local/bin/computeMCP-gateway --no-console
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
-# The service must never run as root.
+# Prevent privilege gains through exec; install as a non-root user service.
 NoNewPrivileges=true
-PrivateTmp=true
+# A user service's PrivateTmp implies a user namespace which can hide root's
+# ownership of SSH configuration files, causing ssh -G to reject them.
+PrivateTmp=false
 
 [Install]
 WantedBy=default.target

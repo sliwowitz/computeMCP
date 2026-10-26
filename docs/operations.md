@@ -51,7 +51,7 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ```
 
 - `ExecStart` invokes the pipx shim directly, so the service needs no shell
@@ -60,8 +60,28 @@ PrivateTmp=true
 - `ExecReload` sends `SIGHUP`; the daemon re-parses the configuration and token
   file without dropping live tunnels. A malformed file is logged and the
   previous configuration is kept.
-- `NoNewPrivileges` and `PrivateTmp` keep the service from running as root and
-  from seeing other users' `/tmp`.
+- `NoNewPrivileges` prevents privilege gains through execution; it does not
+  replace running the service as a non-root user.
+- `PrivateTmp=false` preserves host file ownership as seen by SSH. In a user
+  service, enabling it implicitly enables a user namespace which can make
+  root-owned SSH configuration files appear owned by an unmapped UID.
+  `ssh -G` then rejects them with `Bad owner or permissions`. This choice
+  forgoes private `/tmp` and `/var/tmp` directories and their cleanup on stop;
+  normal filesystem permissions still apply. See
+  [systemd's namespace behavior](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#PrivateTmp=).
+
+For an already installed unit, use
+`systemctl --user edit compute-mcp-gateway.service` and add:
+
+```ini
+[Service]
+PrivateTmp=false
+```
+
+Then run `systemctl --user daemon-reload` and
+`systemctl --user restart compute-mcp-gateway.service` (interrupts connections).
+A gateway configuration reload does not apply unit changes. Do not change the
+ownership or permissions of system SSH configuration files to work around this.
 
 ### Reloading
 
