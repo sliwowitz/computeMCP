@@ -284,10 +284,11 @@ targets after load. When forcing `tunnel` into a target that has no
 ### SSH-agent authentication (opt-in)
 
 Omitting `agent_path` preserves existing authentication and key fallback behavior.
-To opt in with an already-running GCR agent:
+Agent support uses the SSH-agent protocol, not a GCR-specific API. OpenSSH
+`ssh-agent`, GCR and compatible agents can supply keys, subject to their key
+support and unlock/confirmation policies. To check the current shell's agent:
 
 ```bash
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/gcr/ssh"
 ssh-add -l
 computeMCP-gateway
 ```
@@ -303,7 +304,8 @@ The public key selects the container identity and supplies bundle `authorized_ke
 In agent mode, each route hop uses its own `IdentityFile` and `IdentitiesOnly`;
 its `IdentityAgent` overrides the target socket. `"none"` disables agent use.
 The gateway never forwards the agent in this mode. Services need the socket
-in their own environment or an explicit path.
+in their own environment or an explicit path; see
+[SSH agents under systemd](operations.md#ssh-agents-under-systemd).
 
 In setup, enter `-` at **Private key path**, then supply the public key and socket.
 Connection errors prompt a generic connectivity check; no VPN management is added.

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: ISC
 """Exercise agent signing over real local SSH connections, without private files."""
 
+import asyncio
 import errno
 import os
 import re
@@ -215,7 +216,7 @@ async def test_reconnect_reads_current_identities_and_never_loads_default_files(
     default_dir.mkdir()
     (default_dir / "id_ed25519").write_bytes(key.export_private_key())
     command("-D")
-    with pytest.raises(AgentError, match="no matching identity"):
+    with pytest.raises(AgentError, match="no identities.*load or unlock"):
         async with authentication_keys(
             [str(public)], agent_path="SSH_AUTH_SOCK", identities_only=True,
         ):
@@ -245,13 +246,74 @@ async def test_explicit_socket_works_without_environment(agent, monkeypatch):
 
 
 async def test_missing_agent_reports_actionable_error(tmp_path):
-    with pytest.raises(SSHError, match="SSH agent unavailable"):
+    with pytest.raises(SSHError, match="SSH agent unavailable.*socket does not exist"):
         await route_connection(TEST_PORT, agent_path=str(tmp_path / "missing.sock"))
 
 
 async def test_explicit_environment_agent_requires_socket():
-    with pytest.raises(SSHError, match="set SSH_AUTH_SOCK"):
+    with pytest.raises(SSHError, match="set SSH_AUTH_SOCK.*systemd service"):
         await route_connection(TEST_PORT, agent_path="SSH_AUTH_SOCK")
+
+
+async def test_loaded_agent_without_selected_identity_reports_selector_remedy(agent, tmp_path):
+    agent[1]("loaded")
+    public = tmp_path / "not-loaded.pub"
+    public.write_bytes(asyncssh.generate_private_key("ssh-ed25519").export_public_key())
+    with pytest.raises(AgentError, match="no matching identity.*IdentityFile/IdentitiesOnly"):
+        async with authentication_keys(
+            [str(public)], agent_path="SSH_AUTH_SOCK", identities_only=True,
+        ):
+            pytest.fail("must not offer unrelated identities")
+
+
+async def test_empty_agent_reports_inspection_command(agent):
+    with pytest.raises(AgentError, match="no identities.*ssh-add -l"):
+        async with authentication_keys([], agent_path="SSH_AUTH_SOCK"):
+            pytest.fail("an empty agent cannot authenticate")
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (ConnectionRefusedError(errno.ECONNREFUSED, "refused"), "no agent is listening"),
+        (PermissionError(errno.EACCES, "denied"), "gateway user cannot access"),
+        (ValueError("Invalid agent response"), "Invalid agent response"),
+    ],
+)
+async def test_agent_connection_errors_are_not_target_network_errors(tmp_path, monkeypatch, error, message):
+    @asynccontextmanager
+    async def fail(*args):
+        raise error
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(asyncssh, "connect_agent", fail)
+    with pytest.raises(SSHError, match=message) as caught:
+        await route_connection(TEST_PORT, agent_path=str(tmp_path / "agent.sock"))
+    assert "Cannot reach target" not in str(caught.value)
+    assert "socket permissions" in str(caught.value)
+
+
+async def test_agent_identity_timeout_is_not_reported_as_target_timeout(tmp_path, monkeypatch):
+    closed = []
+
+    class UnresponsiveAgent:
+        async def get_keys(self):
+            await asyncio.Event().wait()
+
+    @asynccontextmanager
+    async def stalled_agent(*args):
+        try:
+            yield UnresponsiveAgent()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(asyncssh, "connect_agent", stalled_agent)
+    with pytest.raises(SSHError, match="SSH agent.*did not respond within"):
+        await connect_ssh(
+            LOCALHOST, port=TEST_PORT, name="test",
+            agent_path=str(tmp_path / "agent.sock"), connect_timeout=0.01,
+        )
+    assert closed == [True]
 
 
 async def test_empty_agent_does_not_block_interactive_auth(agent):

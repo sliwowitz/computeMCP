@@ -83,6 +83,92 @@ Then run `systemctl --user daemon-reload` and
 A gateway configuration reload does not apply unit changes. Do not change the
 ownership or permissions of system SSH configuration files to work around this.
 
+### SSH agents under systemd
+
+The shipped user service is agent-neutral: it neither starts an SSH agent nor
+requires GCR. Enable agent authentication explicitly in the target configuration
+(`agent_path = "SSH_AUTH_SOCK"` or an explicit socket path). Existing targets
+without `agent_path` keep their previous behavior.
+
+User services inherit the **user manager's** environment, not the shell that
+runs `systemctl`. They do not source `.bashrc` or `.profile`; `PassEnvironment=`
+is unnecessary for a user service. Check whether the desktop already supplies:
+
+```bash
+systemctl --user show-environment | grep '^SSH_AUTH_SOCK='
+```
+
+Choose one socket configuration pattern:
+
+- **Inherited:** if the manager already has the correct socket, no override is
+  needed. For a one-session setup, run `systemctl --user import-environment
+  SSH_AUTH_SOCK` from a shell with a working agent, then restart the gateway.
+  This is not persistent configuration; import only this variable, not the
+  whole shell environment. An explicit service override takes precedence.
+- **Service-specific:** use `systemctl --user edit compute-mcp-gateway.service`
+  to set `Environment=SSH_AUTH_SOCK=...` in `[Service]`. Prefer a stable socket
+  path. Alternatively, set an explicit `agent_path` in the target configuration.
+- **User-wide:** define `SSH_AUTH_SOCK` in
+  `~/.config/environment.d/60-ssh-agent.conf` if all user services should use
+  that agent. Unlike `Environment=` in a unit, this file supports variable
+  expansion, e.g. `SSH_AUTH_SOCK=${XDG_RUNTIME_DIR}/gcr/ssh`. Run
+  `systemctl --user daemon-reload` and restart affected services after changes.
+
+#### Example: GCR
+
+For an installation providing `gcr-ssh-agent.socket`, use this optional
+service drop-in (other agents need their own socket paths/unit names):
+
+```ini
+[Unit]
+Wants=gcr-ssh-agent.socket
+After=gcr-ssh-agent.socket
+
+[Service]
+Environment=SSH_AUTH_SOCK=%t/gcr/ssh
+```
+
+`%t` is the user's runtime directory. Apply and start the installed unit:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now compute-mcp-gateway.service
+# If it was already running, apply the new environment:
+systemctl --user restart compute-mcp-gateway.service
+journalctl --user -u compute-mcp-gateway.service -n 50 --no-pager
+```
+
+Stop a manually running gateway first to avoid a port conflict. Use
+`computeMCP-gatewayctl` for approvals when the service runs headless.
+
+Socket availability is not key readiness: a locked keyring, hardware token or
+confirmation-required key may need operator interaction. Starting the gateway
+before login (for example with user lingering) does not unlock those keys.
+Do not launch an agent inside the gateway, scan for arbitrary sockets, or load
+private keys automatically as a workaround.
+
+#### Agent diagnostics
+
+| Error | Check |
+| --- | --- |
+| Resolves to no socket | Set the gateway's environment or an explicit `agent_path`. |
+| Socket does not exist | Check the path and start the intended agent/socket unit. |
+| No agent is listening | The socket may be stale; check the agent service. |
+| Cannot access the socket | Run as the intended user; inspect permissions, not world-writable fixes. |
+| Agent did not respond | Check agent responsiveness; this is not a target network timeout. |
+| No identities | Load/unlock the required key in that agent. |
+| No matching identity | Check `IdentityFile`/`IdentitiesOnly` or `client_public_key` against loaded keys. |
+
+Inspect the **same socket the gateway uses** with
+`SSH_AUTH_SOCK=/path/to/agent.sock ssh-add -l`. Route `IdentityAgent` settings can
+override the target socket. A listed key can still refuse signing or be rejected
+by the server; these diagnostics do not claim every authentication failure is an
+empty agent. Agent forwarding remains disabled in opt-in agent mode.
+
+References: [systemd service environments](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment),
+[environment.d](https://www.freedesktop.org/software/systemd/man/latest/environment.d.html),
+[manager environment commands](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#Environment%20Commands).
+
 ### Reloading
 
 Two equivalent triggers re-read the full graph (config, tokens, `systems/`):
