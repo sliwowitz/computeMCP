@@ -623,8 +623,11 @@ apptainer_start() {
 }
 
 apptainer_stop() {
-    if command -v apptainer >/dev/null; then
-        apptainer instance stop "$NAME" || true
+    # Absence is harmless; failure to list or stop must preserve endpoint state.
+    local INSTANCES
+    INSTANCES="$(apptainer instance list)"
+    if awk -v NAME="$NAME" '$1 == NAME {FOUND=1} END {exit !FOUND}' <<< "$INSTANCES"; then
+        apptainer instance stop "$NAME"
     fi
     rm -f "$STATE/container.endpoint"
 }
